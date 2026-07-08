@@ -20,6 +20,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="product-icons.js"></script>
 <script>
   window.fbReady = new Promise(res => { window._fbReadyResolve = res; });
 </script>
@@ -1444,7 +1445,7 @@ function renderDashboard(){
           const cost = avgCost[sz];
           const profit = cost!==null ? sell - cost : null;
           return `<div class="stat">
-            <div class="label">${sz} kg</div>
+            <div class="label" style="display:flex;align-items:center;gap:6px;">${iconImgHtml(tankIconSrc('regular', sz), 26)}${sz} kg</div>
             <div class="value mono" style="font-size:17px;">฿${fmtMoney(sell)}</div>
             ${profit!==null
               ? `<div class="rem-meta" style="margin-top:2px;color:${profit>=0?'var(--green)':'var(--red)'};">กำไร ${profit>=0?'+':''}฿${fmtMoney(Math.round(profit))} (ทุนเฉลี่ย ฿${fmtMoney(Math.round(cost))})</div>`
@@ -1463,6 +1464,7 @@ function renderDashboard(){
         ${state.otherProducts.map(p=>`<option value="${escapeAttr(p.id)}" ${pickedOtherProduct && pickedOtherProduct.id===p.id?'selected':''}>${escapeHtml(p.name)}</option>`).join('')}
       </select>
       ${pickedOtherProduct? `
+      ${iconImgHtml(productIconSrc(pickedOtherProduct.id), 56) ? `<div style="text-align:center;margin-bottom:8px;">${iconImgHtml(productIconSrc(pickedOtherProduct.id), 56)}</div>` : ''}
       <div class="grid2" style="margin-bottom:8px;">
         <div class="stat"><div class="label">ราคาขาย/${escapeHtml(pickedOtherProduct.unit||'ชิ้น')}</div><div class="value mono" style="font-size:17px;">฿${fmtMoney(pickedOtherProduct.price)}</div></div>
         <div class="stat"><div class="label">ต้นทุน/${escapeHtml(pickedOtherProduct.unit||'ชิ้น')}</div><div class="value mono" style="font-size:17px;">฿${fmtMoney(pickedOtherProduct.cost)}</div></div>
@@ -3183,19 +3185,23 @@ function buildItemsTableHtml(record, amount){
   const gasRows = items.map(item=>{
     const unitPrice = Number(state.gasPrices[item.size]||0);
     const brandTag = item.brand==='ptt' ? ' (🅿 ปตท)' : '';
+    const icon = iconImgHtml(tankIconSrc(item.brand, item.size), 20);
     return `<tr>
-      <td style="${tdStyle}">แก๊ส ${item.size} kg${brandTag}</td>
+      <td style="${tdStyle}">${icon}<span style="margin-left:${icon?'4px':'0'};">แก๊ส ${item.size} kg${brandTag}</span></td>
       <td style="${tdStyle}text-align:center;">${item.qty}</td>
       <td style="${tdStyle}text-align:center;">${fmtMoney(unitPrice)}</td>
       <td style="${tdStyle}text-align:right;">${fmtMoney(item.qty*unitPrice)}</td>
     </tr>`;
   }).join('');
-  const otherRows = otherItems.map(item=>`<tr>
-      <td style="${tdStyle}">${escapeHtml(item.name)}</td>
+  const otherRows = otherItems.map(item=>{
+    const icon = iconImgHtml(productIconSrc(item.productId), 20);
+    return `<tr>
+      <td style="${tdStyle}">${icon}<span style="margin-left:${icon?'4px':'0'};">${escapeHtml(item.name)}</span></td>
       <td style="${tdStyle}text-align:center;">${item.qty}</td>
       <td style="${tdStyle}text-align:center;">${fmtMoney(item.price)}</td>
       <td style="${tdStyle}text-align:right;">${fmtMoney(item.qty*item.price)}</td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
   const tableRows = hasAnyItems ? (gasRows + otherRows) : `<tr>
       <td style="${tdStyle}">${escapeHtml(record.note || 'อื่นๆ')}</td>
       <td style="${tdStyle}text-align:center;">1</td>
@@ -4171,9 +4177,13 @@ function lineItemBuilderHtml(prefix, initialItems){
   window._lineBuilders[prefix] = (initialItems || []).map(i=>({ size:String(i.size), brand:i.brand||'regular', qty:Number(i.qty||0) })).filter(i=>i.qty>0);
   return `
     <div class="field-row" style="align-items:flex-end;">
+      <div class="field" style="flex:0 0 44px;">
+        <label style="font-size:11px;">&nbsp;</label>
+        <img id="${prefix}_icon" src="${tankIconSrc('regular','15')}" style="width:40px;height:40px;image-rendering:pixelated;border-radius:6px;display:block;">
+      </div>
       <div class="field" style="flex:1;">
         <label style="font-size:11px;">ขนาด</label>
-        <select id="${prefix}_size">${GAS_SIZES.map(sz=>`<option value="${sz}" ${sz==='15'?'selected':''}>${sz} kg</option>`).join('')}</select>
+        <select id="${prefix}_size" data-icon-role="size" data-icon-prefix="${prefix}">${GAS_SIZES.map(sz=>`<option value="${sz}" ${sz==='15'?'selected':''}>${sz} kg</option>`).join('')}</select>
       </div>
       <div class="field" style="flex:1;">
         <label style="font-size:11px;">จำนวน</label>
@@ -4181,7 +4191,7 @@ function lineItemBuilderHtml(prefix, initialItems){
       </div>
       <div class="field" style="flex:1;">
         <label style="font-size:11px;">ยี่ห้อ</label>
-        <select id="${prefix}_brand">
+        <select id="${prefix}_brand" data-icon-role="brand" data-icon-prefix="${prefix}">
           <option value="regular">ธรรมดา</option>
           <option value="ptt">🅿 ปตท</option>
         </select>
@@ -4198,7 +4208,10 @@ function renderLineItemsBox(prefix){
   if(!items.length){ box.innerHTML = '<div class="rem-meta">ยังไม่ได้เพิ่มถัง</div>'; return; }
   box.innerHTML = items.map((l,i)=>`
     <div class="card" style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;margin-bottom:4px;">
-      <div>🛢️ ${l.size} kg × ${l.qty} (${GAS_BRAND_LABELS[l.brand]})</div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        ${iconImgHtml(tankIconSrc(l.brand, l.size), 32)}
+        <div>${l.size} kg × ${l.qty} (${GAS_BRAND_LABELS[l.brand]})</div>
+      </div>
       <button type="button" class="btn danger small" data-remove-line-item="${prefix}|${i}">ลบ</button>
     </div>`).join('');
 }
@@ -4225,6 +4238,26 @@ document.getElementById('modalRoot').addEventListener('click', e=>{
     renderLineItemsBox(prefix);
   }
 });
+// keeps the little icon preview next to each line-item builder's select(s) in sync as the user
+// picks a different size/brand/product, before they've pressed ➕ yet
+document.getElementById('modalRoot').addEventListener('change', e=>{
+  const sizeBrandSel = e.target.closest('[data-icon-role="size"],[data-icon-role="brand"]');
+  if(sizeBrandSel){
+    const prefix = sizeBrandSel.dataset.iconPrefix;
+    const sizeEl = document.getElementById(`${prefix}_size`);
+    const brandEl = document.getElementById(`${prefix}_brand`);
+    const img = document.getElementById(`${prefix}_icon`);
+    if(img && sizeEl && brandEl) img.src = tankIconSrc(brandEl.value, sizeEl.value) || '';
+    return;
+  }
+  const otherSel = e.target.closest('[data-icon-role="other"]');
+  if(otherSel){
+    const prefix = otherSel.dataset.iconPrefix;
+    const img = document.getElementById(`${prefix}_otherIcon`);
+    const product = state.otherProducts.find(p=>p.id===otherSel.value);
+    if(img) img.src = product ? (productIconSrc(product.id) || '') : '';
+  }
+});
 
 /* ---------------- reusable "สินค้าอื่นๆ" line-item builder: same select -> qty -> ➕ pattern as the
    gas builder above, but for non-gas products from state.otherProducts (hoses, valves, new-cylinder
@@ -4238,11 +4271,16 @@ function otherProductLineBuilderHtml(prefix, initialItems){
   if(!state.otherProducts.length){
     return `<div class="rem-meta">ยังไม่มีสินค้าอื่นในระบบ (เพิ่มได้ที่การ์ด "ราคาสินค้าทั้งหมด" ในแดชบอร์ด)</div><div id="${prefix}_otherlist" style="margin-top:8px;"></div>`;
   }
+  const firstProduct = state.otherProducts[0];
   return `
     <div class="field-row" style="align-items:flex-end;">
+      <div class="field" style="flex:0 0 44px;">
+        <label style="font-size:11px;">&nbsp;</label>
+        <img id="${prefix}_otherIcon" src="${firstProduct? productIconSrc(firstProduct.id) : ''}" style="width:40px;height:40px;image-rendering:pixelated;border-radius:6px;display:block;">
+      </div>
       <div class="field" style="flex:2;">
         <label style="font-size:11px;">สินค้า</label>
-        <select id="${prefix}_otherProduct">${state.otherProducts.map(p=>`<option value="${escapeAttr(p.id)}">${escapeHtml(p.name)} (฿${fmtMoney(p.price)}/${escapeHtml(p.unit||'ชิ้น')})</option>`).join('')}</select>
+        <select id="${prefix}_otherProduct" data-icon-role="other" data-icon-prefix="${prefix}">${state.otherProducts.map(p=>`<option value="${escapeAttr(p.id)}">${escapeHtml(p.name)} (฿${fmtMoney(p.price)}/${escapeHtml(p.unit||'ชิ้น')})</option>`).join('')}</select>
       </div>
       <div class="field" style="flex:1;">
         <label style="font-size:11px;">จำนวน</label>
@@ -4260,7 +4298,10 @@ function renderOtherLineItemsBox(prefix){
   if(!items.length){ box.innerHTML = '<div class="rem-meta">ยังไม่ได้เพิ่มสินค้าอื่น</div>'; return; }
   box.innerHTML = items.map((l,i)=>`
     <div class="card" style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;margin-bottom:4px;">
-      <div>🧰 ${escapeHtml(l.name)} × ${l.qty} ${escapeHtml(l.unit||'ชิ้น')} (฿${fmtMoney(l.price*l.qty)})</div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        ${iconImgHtml(productIconSrc(l.productId), 32) || '🧰'}
+        <div>${escapeHtml(l.name)} × ${l.qty} ${escapeHtml(l.unit||'ชิ้น')} (฿${fmtMoney(l.price*l.qty)})</div>
+      </div>
       <button type="button" class="btn danger small" data-remove-other-line-item="${prefix}|${i}">ลบ</button>
     </div>`).join('');
 }
