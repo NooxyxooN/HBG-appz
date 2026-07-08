@@ -25,7 +25,7 @@
 </script>
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js";
-  import { getFirestore, doc, getDoc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
+  import { getFirestore, doc, getDoc, setDoc, onSnapshot, runTransaction } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyCGbRb6h1lGf7JpqLoVT-giA0L1xydeC5A",
@@ -63,6 +63,24 @@
     }, err=>{
       console.error('fbListen error', key, err);
       if(window.showSaveError) window.showSaveError('เชื่อมต่อฐานข้อมูลแบบเรียลไทม์ไม่สำเร็จ: ' + err.message);
+    });
+  };
+  // atomically adjusts ONE item inside a collection document (e.g. one customer's debt/gas
+  // cylinders) against whatever is currently on the server, instead of the caller's local (possibly
+  // stale) cached copy of the whole array — this is what prevents two devices editing around the
+  // same time from silently discarding each other's change (last write wins on the whole doc otherwise)
+  window.fbAdjustItem = async function(key, itemId, mutatorFn){
+    if(fbError) throw fbError;
+    const ref = doc(db, COLLECTION, key);
+    return runTransaction(db, async (tx)=>{
+      const snap = await tx.get(ref);
+      const items = snap.exists() ? (snap.data().items || []) : [];
+      const idx = items.findIndex(x=>x.id===itemId);
+      if(idx===-1) throw new Error('ไม่พบรายการนี้ในฐานข้อมูล (อาจถูกลบไปแล้วจากอีกเครื่อง)');
+      const updated = mutatorFn({ ...items[idx] });
+      items[idx] = updated;
+      tx.set(ref, { items, updatedAt: Date.now() });
+      return updated;
     });
   };
 
@@ -327,6 +345,30 @@ async function saveData(key, value){
     showSaveError('บันทึกไม่สำเร็จ: ' + (e && e.message ? e.message : String(e)));
   }
 }
+// safe starting point for a customer mutator function passed to adjustCustomerRemote — deep-clones
+// the gasCylindersBreakdown array so in-place helpers like addToCustomerGasBreakdown never risk
+// touching anything shared with other in-flight reads
+function cloneCustomerForEdit(fresh){
+  return { ...fresh, gasCylindersBreakdown: Array.isArray(fresh.gasCylindersBreakdown) ? fresh.gasCylindersBreakdown.map(x=>({...x})) : [] };
+}
+// applies a debt/gas-cylinder change to ONE customer against the latest server data via a Firestore
+// transaction (see window.fbAdjustItem) instead of read-modify-write on the whole locally-cached
+// customers array — this is what actually prevents two devices completing deliveries around the
+// same time from silently clobbering each other's debt update ("new debt didn't add to old debt")
+async function adjustCustomerRemote(customerId, mutatorFn){
+  try{
+    await fbReadyOrTimeout();
+    const updated = await window.fbAdjustItem('customers', customerId, mutatorFn);
+    const local = state.customers.find(c=>c.id===customerId);
+    if(local && updated) Object.assign(local, updated);
+    hideSaveError();
+    return updated;
+  }catch(e){
+    console.error('adjustCustomerRemote failed', customerId, e);
+    showSaveError('ปรับยอดลูกค้าไม่สำเร็จ: ' + (e && e.message ? e.message : String(e)));
+    return null;
+  }
+}
 function showSaveError(msg){
   let el = document.getElementById('saveErrorBanner');
   if(!el){
@@ -347,10 +389,26 @@ function emptyInventory(){
   ['4','7','15','48'].forEach(sz=>{ inv[sz] = { regular:{full:0,empty:0}, ptt:{full:0,empty:0} }; });
   return inv;
 }
-let state = { customers: [], sales: [], reminders: [], tasks: [], purchases: [], transactions: [], gasPrices: {4:0,7:0,15:0,48:0}, pickupDiscount: {4:10,7:10,15:20,48:20}, inventory: emptyInventory(), dailySummaries: {}, loaded:false };
+// default catalog of non-gas products the shop also sells — cost is left at 0 until the owner
+// fills it in (per-product profit only shows once a cost is entered, same convention as gas)
+const DEFAULT_OTHER_PRODUCTS = [
+  { id:'op_milk', name:'นมหนู', price:80, cost:0, unit:'ชิ้น' },
+  { id:'op_showerhead', name:'หัวฝักบัว', price:80, cost:0, unit:'ชิ้น' },
+  { id:'op_frame4kg', name:'โครงแก๊สสำหรับถัง 4kg', price:160, cost:0, unit:'ชิ้น' },
+  { id:'op_valve', name:'วาล์วแก๊ส', price:290, cost:0, unit:'ชิ้น' },
+  { id:'op_regulator', name:'วาล์วแรงดัน', price:550, cost:0, unit:'ชิ้น' },
+  { id:'op_hose', name:'สายแก๊ส', price:150, cost:0, unit:'เมตร' },
+  { id:'op_clamp', name:'แหวนรัดสาย', price:10, cost:0, unit:'ชิ้น' },
+  { id:'op_tank15_regular', name:'ถังใหม่ 15kg (ธรรมดา)', price:2800, cost:0, unit:'ถัง' },
+  { id:'op_tank15_ptt', name:'ถังใหม่ 15kg (🅿 ปตท)', price:3300, cost:0, unit:'ถัง' },
+  { id:'op_tank4_regular', name:'ถังใหม่ 4kg + โครง พร้อมใช้ (ธรรมดา)', price:1550, cost:0, unit:'ชุด' },
+  { id:'op_tank4_ptt', name:'ถังใหม่ 4kg + โครง พร้อมใช้ (🅿 ปตท)', price:1750, cost:0, unit:'ชุด' }
+];
+let state = { customers: [], sales: [], reminders: [], tasks: [], purchases: [], transactions: [], gasPrices: {4:0,7:0,15:0,48:0}, pickupDiscount: {4:10,7:10,15:20,48:20}, inventory: emptyInventory(), dailySummaries: {}, otherProducts: [], loaded:false };
 let currentTab = 'dashboard';
 let salesPeriod = 'day';
 let salesViewDate = todayISO();
+let selectedOtherProductId = null;
 
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
 function todayISO(){ return new Date().toISOString().slice(0,10); }
@@ -391,6 +449,7 @@ let tasksSort = 'urgency';
 let purchasesSort = 'date';
 let purchasesArchiveOpen = false;
 let plDetailPeriod = 'month';
+let dashboardPLPeriod = 'month';
 let plDetailSearch = '';
 let plDetailCustomDate = todayISO();
 let recentSalesSort = 'date';
@@ -491,6 +550,7 @@ async function init(){
   state.pickupDiscount = await loadData('pickupDiscount', {4:10,7:10,15:20,48:20});
   state.inventory = await loadData('inventory', emptyInventory());
   state.dailySummaries = await loadData('dailySummaries', {});
+  state.otherProducts = await loadData('otherProducts', DEFAULT_OTHER_PRODUCTS);
   migrateNumericSoiMoo();
   state.loaded = true;
   document.getElementById('todayLabel').textContent = new Date().toLocaleDateString('th-TH',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
@@ -500,7 +560,7 @@ async function init(){
   document.getElementById('shareQrBtn').addEventListener('click', openShareModal);
   trySaveDailySummaryIfDue();
 
-  // keep task urgency icons / elapsed-time counters fresh, and check the 21:00 daily summary snapshot
+  // keep task urgency icons / elapsed-time counters fresh, and refresh the daily summary snapshot
   setInterval(()=>{
     if(currentTab==='tasks') render();
     trySaveDailySummaryIfDue();
@@ -519,6 +579,7 @@ async function init(){
     window.fbListen('pickupDiscount', items=>{ if(items){ state.pickupDiscount = items; render(); } });
     window.fbListen('inventory', items=>{ if(items){ state.inventory = items; render(); } });
     window.fbListen('dailySummaries', items=>{ if(items){ state.dailySummaries = items; render(); } });
+    window.fbListen('otherProducts', items=>{ if(items){ state.otherProducts = items; render(); } });
   }catch(e){ console.error('realtime listener setup failed', e); }
 }
 
@@ -586,6 +647,7 @@ function persistTransactions(){ saveData('transactions', state.transactions); }
 function persistPickupDiscount(){ saveData('pickupDiscount', state.pickupDiscount); }
 function persistInventory(){ saveData('inventory', state.inventory); }
 function persistDailySummaries(){ saveData('dailySummaries', state.dailySummaries); }
+function persistOtherProducts(){ saveData('otherProducts', state.otherProducts); }
 
 function computeDailySummary(dateStr){
   const salesToday = state.sales.filter(s=>s.date===dateStr);
@@ -622,15 +684,12 @@ function computeDailySummary(dateStr){
   };
 }
 function trySaveDailySummaryIfDue(){
-  const now = new Date();
-  if(now.getHours() < 21) return; // only auto-save from 21:00 onward
+  // recomputes and overwrites today's snapshot every time this runs (page load + the 60s interval),
+  // starting from 00:00 — i.e. continuously all day, not just after a fixed evening cutoff. This
+  // naturally stops updating once the date rolls over past midnight, since dateStr becomes
+  // tomorrow's date and yesterday's snapshot is left as its last save (the "freeze" happens on its
+  // own from the date change, not from a time-of-day gate).
   const dateStr = todayISO();
-  // recompute and overwrite today's snapshot every time this runs (page load + the 60s interval)
-  // instead of freezing at the very first save past 21:00 — otherwise any sale/purchase entered
-  // *after* that first save (e.g. doing bookkeeping late in the evening) would never make it into
-  // the snapshot, which is exactly what caused a real day to show ฿0 income/expense despite having
-  // actual sales recorded. This naturally stops updating once the date rolls over past midnight,
-  // since dateStr becomes tomorrow's date and yesterday's snapshot is left as its last save.
   state.dailySummaries[dateStr] = computeDailySummary(dateStr);
   persistDailySummaries();
 }
@@ -776,6 +835,16 @@ function gasBreakdownSummary(b){
     const brandTag = brand==='ptt'? ' (🅿 ปตท)' : '';
     return `แก๊ส${sz}kg${brandTag} จำนวน ${qty} ถัง`;
   }).join(', ');
+}
+// summarizes an otherItems array (non-gas products picked via the "สินค้าอื่นๆ" line builder) for
+// display on task/sale cards, e.g. "สายแก๊ส ×2 (฿300), แหวนรัดสาย ×1 (฿10)"
+function otherItemsSummary(items){
+  if(!items || !items.length) return '';
+  return items.map(i=>`${i.name} ×${i.qty} (฿${fmtMoney(Number(i.price||0)*Number(i.qty||0))})`).join(', ');
+}
+function sumOtherItemsTotal(items){
+  if(!items || !items.length) return 0;
+  return items.reduce((a,i)=>a+Number(i.price||0)*Number(i.qty||0), 0);
 }
 // normalize any breakdown (array or size-keyed object) into a flat array of {size,brand,qty}
 function breakdownToLineItems(b){
@@ -1306,12 +1375,6 @@ function openPurchaseQuickPayForm(id){
 
 /* ---------------- DASHBOARD ---------------- */
 function renderDashboard(){
-  const today = todayISO();
-  const monthKey = today.slice(0,7);
-  // only count sales that were actually paid — ค้างจ่าย (unpaid/debt) sales aren't real income yet,
-  // they get counted as income later on whatever day the customer actually pays it off
-  const saleToday = state.sales.filter(s=>s.date===today && !s.unpaid).reduce((a,b)=>a+Number(b.amount),0);
-  const saleMonth = state.sales.filter(s=>s.date.slice(0,7)===monthKey && !s.unpaid).reduce((a,b)=>a+Number(b.amount),0);
   const totalDebt = state.customers.reduce((a,c)=>a+Number(c.debt||0),0);
   const totalGas = state.customers.reduce((a,c)=>a+Number(c.gasCylinders||0),0);
   // split the total borrowed-cylinder count by brand for the dashboard card. Older/bulk-imported
@@ -1336,34 +1399,44 @@ function renderDashboard(){
   });
   const unpaidBillTotal = unpaidBills.reduce((a,p)=>a+getPurchasePaymentStatus(p).remaining,0);
 
-  const extraIncomeMonth = state.transactions.filter(t=>t.type==='income' && t.date.slice(0,7)===monthKey).reduce((a,t)=>a+Number(t.amount||0),0);
-  const extraExpenseMonth = state.transactions.filter(t=>t.type==='expense' && t.date.slice(0,7)===monthKey).reduce((a,t)=>a+Number(t.amount||0),0);
-  const purchaseExpenseMonth = state.purchases.filter(p=>p.date.slice(0,7)===monthKey).reduce((a,p)=>a+Number(p.billAmount||0),0);
-  const totalIncomeMonth = saleMonth + extraIncomeMonth;
-  const totalExpenseMonth = purchaseExpenseMonth + extraExpenseMonth;
-  const profitMonth = totalIncomeMonth - totalExpenseMonth;
+  // dashboard P&L card period switch (วัน/เดือน/ปี) — reuses getPLItems so the totals here always
+  // match exactly what the detail modal (tap "แตะดู") shows for the same period
+  const dashPLIncomeItems = getPLItems('income', dashboardPLPeriod);
+  const dashPLExpenseItems = getPLItems('expense', dashboardPLPeriod);
+  const totalIncomePeriod = dashPLIncomeItems.reduce((a,i)=>a+Number(i.amount||0),0);
+  const totalExpensePeriod = dashPLExpenseItems.reduce((a,i)=>a+Number(i.amount||0),0);
+  const profitPeriod = totalIncomePeriod - totalExpensePeriod;
+  const dashPLPeriodLabels = { day:'วันนี้', month:'เดือนนี้', year:'ปีนี้' };
+  const dashPLPeriodOptions = [['day','วัน'],['month','เดือน'],['year','ปี']];
 
-  const dailySummaryButtonRow = `<div class="btnrow" style="margin-bottom:12px;"><button class="btn ghost small" id="openDailySummaryBtn">📋 สรุปผลประจำวัน (อัตโนมัติ 21:00 น.)</button></div>`;
+  const dailySummaryButtonRow = `<div class="btnrow" style="margin-bottom:12px;"><button class="btn ghost small" id="openDailySummaryBtn">📋 สรุปผลประจำวัน (อัตโนมัติตั้งแต่ 00:00 น.)</button></div>`;
 
   const plCard = `
     <div class="stamp-card">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-        <div style="font-weight:700;">📊 รายรับ-รายจ่ายเดือนนี้</div>
+        <div style="font-weight:700;">📊 รายรับ-รายจ่าย${dashPLPeriodLabels[dashboardPLPeriod]}</div>
         <button class="btn ghost small" id="addTransactionBtn">➕ เพิ่มรายการ</button>
       </div>
+      <div class="btnrow" style="margin-bottom:10px;">${dashPLPeriodOptions.map(([k,l])=>`<button type="button" class="btn ${dashboardPLPeriod===k?'primary':'ghost'} small" data-dash-pl-period="${k}">${l}</button>`).join('')}</div>
       <div class="grid2" style="margin-bottom:0;">
-        <div class="stat" data-show-pl="income" style="cursor:pointer;"><div class="label">รายรับ (แตะดู)</div><div class="value sale">฿${fmtMoney(totalIncomeMonth)}</div></div>
-        <div class="stat" data-show-pl="expense" style="cursor:pointer;"><div class="label">รายจ่าย (แตะดู)</div><div class="value debt">฿${fmtMoney(totalExpenseMonth)}</div></div>
-        <div class="stat" style="grid-column:span 2;"><div class="label">กำไรสุทธิ</div><div class="value" style="color:${profitMonth>=0?'var(--green)':'var(--red)'};">฿${fmtMoney(profitMonth)}</div></div>
+        <div class="stat" data-show-pl="income" style="cursor:pointer;"><div class="label">รายรับ (แตะดู)</div><div class="value sale">฿${fmtMoney(totalIncomePeriod)}</div></div>
+        <div class="stat" data-show-pl="expense" style="cursor:pointer;"><div class="label">รายจ่าย (แตะดู)</div><div class="value debt">฿${fmtMoney(totalExpensePeriod)}</div></div>
+        <div class="stat" style="grid-column:span 2;"><div class="label">กำไรสุทธิ</div><div class="value" style="color:${profitPeriod>=0?'var(--green)':'var(--red)'};">฿${fmtMoney(profitPeriod)}</div></div>
+        <div class="stat" data-goto-tab="debtors" style="cursor:pointer;grid-column:span 2;"><div class="label">ยอดหนี้รวม (แตะดู)</div><div class="value debt">฿${fmtMoney(totalDebt)}</div></div>
       </div>
     </div>`;
 
   const avgCost = getWeightedAvgCostPerUnit();
+  // "สินค้าอื่นๆ" section — dropdown picks one product at a time out of state.otherProducts so the
+  // card doesn't get long; falls back to the first product if nothing (or a since-deleted id) is selected
+  const pickedOtherProduct = state.otherProducts.find(p=>p.id===selectedOtherProductId) || state.otherProducts[0] || null;
+  const otherProductProfit = pickedOtherProduct && Number(pickedOtherProduct.cost||0)>0
+    ? Number(pickedOtherProduct.price||0) - Number(pickedOtherProduct.cost||0) : null;
   const priceCard = `
     <div class="stamp-card">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-        <div style="font-weight:700;">🛢️ ราคาแก๊ส & กำไรต่อถัง</div>
-        <button class="btn ghost small" id="editPricesBtn">แก้ไข</button>
+        <div style="font-weight:700;">🛢️ ราคาสินค้าทั้งหมด</div>
+        <button class="btn ghost small" id="editPricesBtn">แก้ไขราคาแก๊ส</button>
       </div>
       <div class="grid2" style="margin-bottom:0;">
         ${GAS_SIZES.map(sz=>{
@@ -1380,6 +1453,28 @@ function renderDashboard(){
         }).join('')}
       </div>
       <div class="rem-meta" style="margin-top:8px;">ทุนเฉลี่ยนี้รวมค่าทิปเด็กส่งเข้าไปด้วยแล้ว ถ่วงน้ำหนักตามจำนวนถังจากทุกรายการที่เคยกรอกต้นทุนไว้ในแท็บ "รับถัง"</div>
+      <div style="border-top:1px dashed var(--border);margin:12px 0;"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <div style="font-weight:700;">🧰 สินค้าอื่นๆ</div>
+        <button class="btn ghost small" id="addOtherProductBtn">➕ เพิ่มสินค้า</button>
+      </div>
+      ${!state.otherProducts.length ? `<div class="rem-meta">ยังไม่มีสินค้าอื่นในระบบ กด "เพิ่มสินค้า" เพื่อเริ่มบันทึก</div>` : `
+      <select id="otherProductSelect" style="margin-bottom:8px;">
+        ${state.otherProducts.map(p=>`<option value="${escapeAttr(p.id)}" ${pickedOtherProduct && pickedOtherProduct.id===p.id?'selected':''}>${escapeHtml(p.name)}</option>`).join('')}
+      </select>
+      ${pickedOtherProduct? `
+      <div class="grid2" style="margin-bottom:8px;">
+        <div class="stat"><div class="label">ราคาขาย/${escapeHtml(pickedOtherProduct.unit||'ชิ้น')}</div><div class="value mono" style="font-size:17px;">฿${fmtMoney(pickedOtherProduct.price)}</div></div>
+        <div class="stat"><div class="label">ต้นทุน/${escapeHtml(pickedOtherProduct.unit||'ชิ้น')}</div><div class="value mono" style="font-size:17px;">฿${fmtMoney(pickedOtherProduct.cost)}</div></div>
+      </div>
+      ${otherProductProfit!==null
+        ? `<div class="rem-meta" style="margin-bottom:8px;color:${otherProductProfit>=0?'var(--green)':'var(--red)'};">กำไร ${otherProductProfit>=0?'+':''}฿${fmtMoney(otherProductProfit)} ต่อ${escapeHtml(pickedOtherProduct.unit||'ชิ้น')}</div>`
+        : `<div class="rem-meta" style="margin-bottom:8px;">ยังไม่ได้ใส่ราคาต้นทุน</div>`}
+      <div class="btnrow">
+        <button class="btn ghost small" data-edit-other-product="${escapeAttr(pickedOtherProduct.id)}">แก้ไข</button>
+        <button class="btn danger small" data-del-other-product="${escapeAttr(pickedOtherProduct.id)}">ลบ</button>
+      </div>` : ''}
+      `}
     </div>`;
 
   const inventoryCard = `
@@ -1455,12 +1550,6 @@ function renderDashboard(){
     ${priceCard}
     ${inventoryCard}
     ${purchaseCard}
-    <div class="grid2">
-      <div class="stat"><div class="label">ยอดขายวันนี้</div><div class="value sale">฿${fmtMoney(saleToday)}</div></div>
-      <div class="stat"><div class="label">ยอดขายเดือนนี้</div><div class="value sale">฿${fmtMoney(saleMonth)}</div></div>
-      <div class="stat" data-goto-tab="debtors" style="cursor:pointer;"><div class="label">ยอดหนี้รวม (แตะดู)</div><div class="value debt">฿${fmtMoney(totalDebt)}</div></div>
-      <div class="stat" data-goto-tab="debtors" style="cursor:pointer;"><div class="label">ถังแก๊สที่ยืมอยู่ (แตะดู)</div><div class="value">${fmtMoney(totalGas)} ถัง</div></div>
-    </div>
     ${upcomingReorders.length? `
     <h2 class="section-title">🔁 ใกล้ถึงรอบส่งแล้ว (คาดการณ์จากประวัติสั่งซื้อ)</h2>
     ${upcomingReorders.map(({c, cycle})=>`
@@ -1500,7 +1589,8 @@ function exportFullBackup(){
     gasPrices: state.gasPrices,
     pickupDiscount: state.pickupDiscount,
     inventory: state.inventory,
-    dailySummaries: state.dailySummaries
+    dailySummaries: state.dailySummaries,
+    otherProducts: state.otherProducts
   };
   const json = JSON.stringify(backup, null, 2);
   const blob = new Blob([json], {type:'application/json'});
@@ -1540,6 +1630,65 @@ function openEditPricesForm(){
     });
     persistGasPrices();
     persistPickupDiscount();
+    closeModal();
+    render();
+  });
+}
+
+// add or edit ONE row in the "สินค้าอื่นๆ" catalog (non-gas items: hoses, valves, new-cylinder sales,
+// etc.) — both sell price and cost price live here so the dashboard card can show a per-item profit
+// the same way it already does for the 4 gas sizes
+function openOtherProductForm(id){
+  const p = id ? state.otherProducts.find(x=>x.id===id) : null;
+  const body = `
+    <h3>${p? 'แก้ไขสินค้า' : 'เพิ่มสินค้าใหม่'}</h3>
+    <form class="panel" id="otherProductForm" novalidate>
+      <div class="field"><label>ชื่อสินค้า *</label><input id="f_opName" value="${p? escapeAttr(p.name):''}" placeholder="เช่น สายแก๊ส"></div>
+      <div id="opNameError" class="rem-meta" style="color:var(--red);display:none;">กรุณากรอกชื่อสินค้าก่อนบันทึก</div>
+      <div class="field-row">
+        <div class="field"><label>ราคาขาย (บาท) *</label><input type="number" min="0" step="1" id="f_opPrice" value="${p? p.price||0:0}"></div>
+        <div class="field"><label>ราคาต้นทุน (บาท)</label><input type="number" min="0" step="1" id="f_opCost" value="${p? p.cost||0:0}"></div>
+      </div>
+      <div class="field"><label>หน่วย</label><input id="f_opUnit" value="${p? escapeAttr(p.unit||'ชิ้น') : 'ชิ้น'}" placeholder="เช่น ชิ้น, เมตร, ถัง, ชุด"></div>
+      <div class="btnrow">
+        <button type="submit" class="btn primary">บันทึก</button>
+        ${p? `<button type="button" class="btn danger" id="deleteOtherProductBtn">ลบสินค้านี้</button>` : ''}
+        <button type="button" class="btn ghost" id="cancelModal">ยกเลิก</button>
+      </div>
+    </form>`;
+  showModal(body);
+  if(p){
+    document.getElementById('deleteOtherProductBtn').addEventListener('click', ()=>{
+      if(confirm(`ลบสินค้า "${p.name}" ใช่หรือไม่?`)){
+        state.otherProducts = state.otherProducts.filter(x=>x.id!==p.id);
+        if(selectedOtherProductId===p.id) selectedOtherProductId = null;
+        persistOtherProducts();
+        closeModal();
+        render();
+      }
+    });
+  }
+  document.getElementById('otherProductForm').addEventListener('submit', e=>{
+    e.preventDefault();
+    const name = document.getElementById('f_opName').value.trim();
+    if(!name){
+      document.getElementById('opNameError').style.display = 'block';
+      document.getElementById('f_opName').focus();
+      return;
+    }
+    const data = {
+      name,
+      price: Number(document.getElementById('f_opPrice').value)||0,
+      cost: Number(document.getElementById('f_opCost').value)||0,
+      unit: document.getElementById('f_opUnit').value.trim() || 'ชิ้น'
+    };
+    if(p){ Object.assign(p, data); }
+    else {
+      const newProduct = { id: 'op_'+uid(), ...data };
+      state.otherProducts.push(newProduct);
+      selectedOtherProductId = newProduct.id;
+    }
+    persistOtherProducts();
     closeModal();
     render();
   });
@@ -1614,11 +1763,10 @@ function openEditInventoryForm(){
 
 function openDailySummaryModal(){
   const today = todayISO();
-  const isPastCutoff = new Date().getHours() >= 21;
   const todaySummary = state.dailySummaries[today] || computeDailySummary(today);
   const statusNote = state.dailySummaries[today]
     ? `บันทึกอัตโนมัติแล้วเมื่อ ${new Date(state.dailySummaries[today].savedAt).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'})} น.`
-    : (isPastCutoff ? 'กำลังจะบันทึกอัตโนมัติ (เปิดแอพทิ้งไว้สักครู่)' : 'ยังไม่ถึงเวลาสรุปอัตโนมัติ (21:00 น.) — นี่คือข้อมูลล่าสุด ณ ตอนนี้');
+    : 'กำลังจะบันทึกอัตโนมัติ (เปิดแอพทิ้งไว้สักครู่) — นี่คือข้อมูลล่าสุด ณ ตอนนี้';
 
   function summaryRowsHtml(s){
     return `
@@ -1638,7 +1786,7 @@ function openDailySummaryModal(){
   const historyKeys = Object.keys(state.dailySummaries).filter(d=>d!==today).sort((a,b)=>b.localeCompare(a)).slice(0,7);
   const historyHtml = historyKeys.length ? `
     <h2 class="section-title">ย้อนหลัง</h2>
-    <div class="rem-meta" style="margin-bottom:8px;">ถ้าตัวเลขวันไหนดูผิดปกติ (เช่น ขึ้น ฿0 ทั้งที่มีขายจริง) มักเป็นเพราะบันทึกรายการเข้าระบบหลัง 21:00 ไปแล้ว — กด "คำนวณใหม่" ของวันนั้นเพื่อดึงข้อมูลล่าสุดมาคำนวณซ้ำได้เลย</div>
+    <div class="rem-meta" style="margin-bottom:8px;">ถ้าตัวเลขวันไหนดูผิดปกติ (เช่น ขึ้น ฿0 ทั้งที่มีขายจริง) มักเป็นเพราะวันนั้นไม่ได้เปิดแอปเลยจนครบวัน หรือมีคนบันทึกรายการเพิ่มหลังแอปปิดไปแล้ว — กด "คำนวณใหม่" ของวันนั้นเพื่อดึงข้อมูลล่าสุดมาคำนวณซ้ำได้เลย</div>
     ${historyKeys.map(d=>{
       const s = state.dailySummaries[d];
       return `<div class="card">
@@ -1815,8 +1963,250 @@ function openPLDetailModal(type){
 }
 
 /* ---------------- CUSTOMERS ---------------- */
+/* ---------------- duplicate-customer detection + merge ----------------
+   ปัญหา: พิมพ์ชื่อลูกค้าด้วยเสียง (voice input) มักสะกดคลาดเคลื่อนเล็กน้อยในแต่ละครั้ง
+   ทำให้คนเดียวกันถูกบันทึกเป็นหลายรายการ ที่นี่จะสแกนหาชื่อ/เบอร์ที่คล้ายกันทั้งระบบ
+   แล้วให้ผู้ใช้เลือกรวมข้อมูล (debt, ถังแก๊สที่ยืม, ประวัติสั่งของ/งานส่ง) เข้าด้วยกัน */
+function levenshtein(a, b){
+  a = a || ''; b = b || '';
+  const m = a.length, n = b.length;
+  if(m===0) return n;
+  if(n===0) return m;
+  let prev = Array.from({length:n+1}, (_,j)=>j);
+  for(let i=1;i<=m;i++){
+    const cur = [i];
+    for(let j=1;j<=n;j++){
+      cur[j] = a[i-1]===b[j-1] ? prev[j-1] : 1+Math.min(prev[j-1], prev[j], cur[j-1]);
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+function nameSimilarity(a, b){
+  a = (a||'').trim().toLowerCase(); b = (b||'').trim().toLowerCase();
+  if(!a || !b) return 0;
+  if(a===b) return 1;
+  const dist = levenshtein(a, b);
+  const maxLen = Math.max(a.length, b.length);
+  return 1 - dist/maxLen;
+}
+function dupePairKey(id1, id2){ return [id1, id2].sort().join('|'); }
+function getDismissedDupePairs(){
+  try{ return new Set(JSON.parse(localStorage.getItem('dismissedDupePairs')||'[]')); }
+  catch(e){ return new Set(); }
+}
+function addDismissedDupePairs(pairs){
+  const set = getDismissedDupePairs();
+  pairs.forEach(p=>set.add(p));
+  localStorage.setItem('dismissedDupePairs', JSON.stringify([...set]));
+}
+// groups likely-duplicate customers together (transitively, via union-find), skipping
+// pairs the user already dismissed as "not the same person"
+function findDuplicateCustomerGroups(){
+  const dismissed = getDismissedDupePairs();
+  const customers = state.customers;
+  const n = customers.length;
+  const parent = customers.map((_,i)=>i);
+  function find(x){ while(parent[x]!==x){ parent[x]=parent[parent[x]]; x=parent[x]; } return x; }
+  function union(x,y){ const rx=find(x), ry=find(y); if(rx!==ry) parent[rx]=ry; }
+  for(let i=0;i<n;i++){
+    for(let j=i+1;j<n;j++){
+      const a = customers[i], b = customers[j];
+      if(dismissed.has(dupePairKey(a.id, b.id))) continue;
+      const samePhone = a.phone && b.phone && a.phone.trim()===b.phone.trim();
+      const nameA = (a.name||'').trim().toLowerCase(), nameB = (b.name||'').trim().toLowerCase();
+      const substr = nameA.length>=3 && nameB.length>=3 && (nameA.includes(nameB) || nameB.includes(nameA));
+      const sim = nameSimilarity(a.name, b.name);
+      if(samePhone || substr || sim>=0.72) union(i,j);
+    }
+  }
+  const groupsMap = {};
+  for(let i=0;i<n;i++){
+    const root = find(i);
+    (groupsMap[root] = groupsMap[root]||[]).push(customers[i]);
+  }
+  return Object.values(groupsMap).filter(g=>g.length>1);
+}
+// sums the gas-cylinder breakdowns of every customer in the group into one flat array
+function mergeGasBreakdowns(customers){
+  const totals = {};
+  customers.forEach(c=>{
+    breakdownToLineItems(c.gasCylindersBreakdown).forEach(item=>{
+      const key = item.size+'_'+item.brand;
+      totals[key] = (totals[key]||0) + Number(item.qty||0);
+    });
+  });
+  return Object.keys(totals).map(k=>{
+    const [size, brand] = k.split('_');
+    return { size, brand, qty: totals[k] };
+  }).filter(i=>i.qty>0);
+}
+function openDuplicateCustomersModal(){
+  const groups = findDuplicateCustomerGroups();
+  const body = `
+    <h3>ตรวจสอบลูกค้าชื่อซ้ำ</h3>
+    ${!groups.length? '<div class="empty">ไม่พบชื่อที่คล้ายกันในระบบตอนนี้ 🎉</div>' : `
+    <div class="rem-meta" style="margin-bottom:10px;">พบ ${groups.length} กลุ่มที่ชื่อ/เบอร์คล้ายกัน — ถ้าเป็นคนเดียวกันกด "รวมกลุ่มนี้" ถ้าไม่ใช่กด "ไม่ใช่คนเดียวกัน" ระบบจะไม่เตือนคู่นี้อีก</div>
+    ${groups.map((g,gi)=>`
+      <div class="card" style="padding:10px 12px;margin-bottom:8px;">
+        ${g.map(c=>`<div style="margin-bottom:2px;">👤 <b>${escapeHtml(c.name)}</b>${c.phone? ' · 📞 '+escapeHtml(c.phone):''}${Number(c.debt||0)>0? ' · หนี้ ฿'+fmtMoney(c.debt):''}</div>`).join('')}
+        <div class="btnrow" style="margin-top:8px;">
+          <button type="button" class="btn primary small" data-merge-group="${gi}">🔀 รวมกลุ่มนี้</button>
+          <button type="button" class="btn ghost small" data-dismiss-group="${gi}">ไม่ใช่คนเดียวกัน</button>
+        </div>
+      </div>`).join('')}
+    `}
+    <div class="btnrow" style="margin-top:6px;"><button type="button" class="btn ghost" id="cancelModal">ปิด</button></div>
+  `;
+  showModal(body);
+  groups.forEach((g,gi)=>{
+    const mergeBtn = document.querySelector(`[data-merge-group="${gi}"]`);
+    if(mergeBtn) mergeBtn.addEventListener('click', ()=>openMergeCustomersModal(g));
+    const dismissBtn = document.querySelector(`[data-dismiss-group="${gi}"]`);
+    if(dismissBtn) dismissBtn.addEventListener('click', ()=>{
+      const pairs = [];
+      for(let i=0;i<g.length;i++) for(let j=i+1;j<g.length;j++) pairs.push(dupePairKey(g[i].id, g[j].id));
+      addDismissedDupePairs(pairs);
+      openDuplicateCustomersModal();
+    });
+  });
+}
+// manual entry point for merging — lets the shop owner freely pick any 2+ customers (search + tick
+// checkboxes) instead of relying only on the automatic name-similarity scanner above, for cases like
+// a nickname vs. formal name that the fuzzy matcher wouldn't catch on its own
+function openManualMergePicker(){
+  let query = '';
+  let selectedIds = new Set();
+  function renderPicker(){
+    const q = query.trim().toLowerCase();
+    const list = q ? state.customers.filter(c=>c.name.toLowerCase().includes(q) || (c.phone||'').includes(q)) : state.customers;
+    const body = `
+      <h3>รวมลูกค้าเอง</h3>
+      <div class="rem-meta" style="margin-bottom:10px;">ค้นหาแล้วติ๊กเลือกอย่างน้อย 2 คนที่เป็นคนเดียวกัน แล้วกด "ถัดไป" เพื่อเลือกว่าใครเป็นตัวหลัก</div>
+      <div class="field" style="margin-bottom:10px;"><input id="manualMergeSearch" placeholder="🔍 ค้นหาชื่อหรือเบอร์โทร..." value="${escapeAttr(query)}"></div>
+      <div style="max-height:320px;overflow-y:auto;">
+        ${list.length? list.map(c=>`
+          <label class="card" style="display:flex;align-items:center;gap:8px;padding:8px 12px;margin-bottom:6px;cursor:pointer;">
+            <input type="checkbox" data-manual-merge-pick="${c.id}" ${selectedIds.has(c.id)?'checked':''}>
+            <div>
+              <div style="font-weight:600;">${escapeHtml(c.name)}</div>
+              <div class="rem-meta">${c.phone? '📞 '+escapeHtml(c.phone):'ไม่มีเบอร์'}${Number(c.debt||0)>0? ' · หนี้ ฿'+fmtMoney(c.debt):''}</div>
+            </div>
+          </label>`).join('') : '<div class="empty">ไม่พบลูกค้าที่ตรงกับคำค้นหา</div>'}
+      </div>
+      <div class="rem-meta" style="margin:8px 0;">เลือกไว้ ${selectedIds.size} คน</div>
+      <div class="btnrow">
+        <button type="button" class="btn primary" id="manualMergeNextBtn" ${selectedIds.size<2?'disabled':''}>ถัดไป (${selectedIds.size})</button>
+        <button type="button" class="btn ghost" id="cancelModal">ยกเลิก</button>
+      </div>
+    `;
+    showModal(body);
+    const searchInput = document.getElementById('manualMergeSearch');
+    searchInput.addEventListener('input', ()=>{
+      query = searchInput.value;
+      const cursorPos = searchInput.selectionStart;
+      renderPicker();
+      const newInput = document.getElementById('manualMergeSearch');
+      if(newInput){ newInput.focus(); newInput.setSelectionRange(cursorPos, cursorPos); }
+    });
+    document.querySelectorAll('[data-manual-merge-pick]').forEach(cb=>cb.addEventListener('change', ()=>{
+      const id = cb.dataset.manualMergePick;
+      if(cb.checked) selectedIds.add(id); else selectedIds.delete(id);
+      renderPicker();
+    }));
+    const nextBtn = document.getElementById('manualMergeNextBtn');
+    if(nextBtn){
+      nextBtn.addEventListener('click', ()=>{
+        const group = state.customers.filter(c=>selectedIds.has(c.id));
+        if(group.length>=2) openMergeCustomersModal(group);
+      });
+    }
+  }
+  renderPicker();
+}
+
+function openMergeCustomersModal(group){
+  function bestDefaultPrimaryId(){
+    const completeness = c => ['phone','address','soi','moo','landmark','notes'].filter(k=>c[k]).length;
+    return group.slice().sort((a,b)=> completeness(b)-completeness(a) || (a.createdAt||'').localeCompare(b.createdAt||''))[0].id;
+  }
+  let primaryId = bestDefaultPrimaryId();
+  function renderMergeModal(){
+    const mergedGas = mergeGasBreakdowns(group);
+    const mergedDebt = group.reduce((a,c)=>a+Number(c.debt||0), 0);
+    const body = `
+      <h3>รวมข้อมูลลูกค้าซ้ำ</h3>
+      <div class="rem-meta" style="margin-bottom:10px;">เลือกว่าใครคือ "ตัวหลัก" (ชื่อ/เบอร์/ที่อยู่จะยึดของคนนี้ ถ้าช่องไหนว่างจะเติมจากคนอื่นให้) ส่วนยอดหนี้และถังแก๊สที่ยืมจะถูกรวมกันเสมอ ประวัติสั่งของ/งานส่งเก่าของทุกคนจะย้ายมาไว้ที่คนนี้คนเดียว</div>
+      ${group.map(c=>`
+        <label class="card" style="display:flex;align-items:center;gap:8px;padding:10px 12px;margin-bottom:6px;cursor:pointer;${c.id===primaryId?'border:2px solid var(--orange-dark);':''}">
+          <input type="radio" name="mergePrimary" value="${c.id}" ${c.id===primaryId?'checked':''}>
+          <div>
+            <div style="font-weight:700;">${escapeHtml(c.name)}${c.id===primaryId? ' <span class="rem-meta" style="color:var(--orange-dark);">(ตัวหลัก)</span>':''}</div>
+            <div class="rem-meta">${c.phone? '📞 '+escapeHtml(c.phone):'ไม่มีเบอร์'}${Number(c.debt||0)>0? ' · หนี้ ฿'+fmtMoney(c.debt):''}</div>
+          </div>
+        </label>`).join('')}
+      <div class="stamp-card" style="margin:10px 0;">
+        <div class="rem-meta" style="font-weight:700;margin-bottom:4px;">ผลลัพธ์หลังรวม</div>
+        <div class="rem-meta">ยอดค้างชำระรวม: ฿${fmtMoney(mergedDebt)}</div>
+        <div class="rem-meta">${mergedGas.length? 'ถังแก๊สที่ยืมรวม: '+mergedGas.map(i=>`${GAS_BRAND_LABELS[i.brand]||i.brand} ${i.size}kg ${i.qty} ถัง`).join(', ') : 'ไม่มีถังแก๊สค้าง'}</div>
+      </div>
+      <div class="btnrow">
+        <button type="button" class="btn primary" id="confirmMergeBtn">🔀 ยืนยันรวมข้อมูล</button>
+        <button type="button" class="btn ghost" id="cancelModal">ยกเลิก</button>
+      </div>
+      <div id="mergeResultMsg" class="rem-meta" style="margin-top:8px;"></div>
+    `;
+    showModal(body);
+    document.querySelectorAll('[name="mergePrimary"]').forEach(r=>r.addEventListener('change', e=>{
+      primaryId = e.target.value;
+      renderMergeModal();
+    }));
+    document.getElementById('confirmMergeBtn').addEventListener('click', ()=>{
+      performMergeCustomers(group, primaryId);
+      document.getElementById('confirmMergeBtn').disabled = true;
+      document.getElementById('mergeResultMsg').textContent = '✓ รวมข้อมูลสำเร็จ';
+      setTimeout(()=>{ closeModal(); render(); }, 900);
+    });
+  }
+  renderMergeModal();
+}
+// merges every customer in `group` into the one whose id is `primaryId`: sums debt + gas
+// breakdown, fills blank fields from the others, concatenates notes, re-points every historical
+// sale/task/reminder that referenced a merged-away id, then removes those duplicate records
+function performMergeCustomers(group, primaryId){
+  const primary = state.customers.find(c=>c.id===primaryId);
+  const others = group.filter(c=>c.id!==primaryId);
+  if(!primary || !others.length) return;
+
+  primary.debt = group.reduce((a,c)=>a+Number(c.debt||0), 0);
+  primary.gasCylindersBreakdown = mergeGasBreakdowns(group);
+
+  ['phone','address','soi','moo','landmark'].forEach(f=>{
+    if(!primary[f]){
+      const donor = others.find(c=>c[f]);
+      if(donor) primary[f] = donor[f];
+    }
+  });
+  const otherNotes = others.filter(c=>c.notes).map(c=>c.notes);
+  const mergeNote = `(รวมจาก: ${others.map(c=>c.name).join(', ')})`;
+  primary.notes = [primary.notes, ...otherNotes, mergeNote].filter(Boolean).join(' | ');
+
+  const otherIds = others.map(c=>c.id);
+  state.sales.forEach(s=>{ if(otherIds.includes(s.customerId)) s.customerId = primary.id; });
+  state.tasks.forEach(t=>{ if(otherIds.includes(t.customerId)) t.customerId = primary.id; });
+  state.reminders.forEach(r=>{ if(otherIds.includes(r.customerId)) r.customerId = primary.id; });
+
+  state.customers = state.customers.filter(c=>!otherIds.includes(c.id));
+
+  persistCustomers();
+  persistSales();
+  persistTasks();
+  persistReminders();
+}
+
 function renderCustomers(){
-  const toolRow = `<div class="btnrow" style="margin-bottom:10px;"><button class="btn ghost small" id="openImportBtn">📋 นำเข้าหลายรายการ</button><button class="btn ghost small" id="exportCsvBtn">📤 ส่งออก CSV</button></div>`;
+  const dupeGroupCount = findDuplicateCustomerGroups().length;
+  const toolRow = `<div class="btnrow" style="margin-bottom:10px;"><button class="btn ghost small" id="openImportBtn">📋 นำเข้าหลายรายการ</button><button class="btn ghost small" id="exportCsvBtn">📤 ส่งออก CSV</button><button class="btn ${dupeGroupCount? 'primary':'ghost'} small" id="openDupeCheckBtn">🔀 ตรวจสอบชื่อซ้ำ${dupeGroupCount? ` (${dupeGroupCount})` : ''}</button><button class="btn ghost small" id="openManualMergeBtn">🔀 รวมลูกค้าเอง</button></div>`;
 
   const activeSummary = [];
   if(customersFilterType!=='all') activeSummary.push({debt:'มีหนี้',gas:'มีถังค้าง',nophone:'ไม่มีเบอร์โทร'}[customersFilterType]);
@@ -1970,7 +2360,7 @@ function renderCustomerCard(c, opts){
         <div class="stat"><div class="label">สั่งล่าสุด</div><div class="value" style="font-size:14px;">${stats.lastDate? fmtDateShort(stats.lastDate) : '-'}</div></div>
       </div>
       ${cycle? `<div class="rem-meta" style="margin-bottom:8px;">🔁 สั่งเฉลี่ยทุก ~${cycle.avgDays} วัน (จาก ${cycle.ordersCount} ครั้งล่าสุด) — คาดว่าจะสั่งอีกครั้งประมาณ ${fmtDateShort(cycle.nextExpectedDate)}${cycle.daysUntilNext<0? ` (เลยรอบมา ${Math.abs(cycle.daysUntilNext)} วันแล้ว)` : cycle.daysUntilNext===0? ' (วันนี้)' : ` (อีก ${cycle.daysUntilNext} วัน)`}</div>` : ''}
-      ${stats.orders.length? stats.orders.slice(0,8).map(o=>`<div class="rem-meta" style="margin-top:5px;">${fmtDateShort(o.date)} — ฿${fmtMoney(o.amount)}${o.gasQty? ' · '+o.gasQty+' ถัง':''}${o.note? ' · '+escapeHtml(o.note):''}</div>`).join('') : '<div class="rem-meta">ยังไม่มีประวัติการสั่งซื้อ</div>'}
+      ${stats.orders.length? stats.orders.slice(0,8).map(o=>`<div class="rem-meta" style="margin-top:5px;cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px;" data-edit-history-sale="${o.id}" title="แตะเพื่อแก้ไขรายการนี้ (บางอันบันทึกผิดแก้ได้ตรงนี้)">${fmtDateShort(o.date)} — ฿${fmtMoney(o.amount)}${o.gasQty? ' · '+o.gasQty+' ถัง':''}${o.note? ' · '+escapeHtml(o.note):''}</div>`).join('') + '<div class="rem-meta" style="margin-top:6px;">✏️ แตะรายการด้านบนเพื่อแก้ไข ถ้าบันทึกผิด</div>' : '<div class="rem-meta">ยังไม่มีประวัติการสั่งซื้อ</div>'}
     </div>` : ''}
   </div>`;
 }
@@ -2124,8 +2514,11 @@ function openPaymentPrompt(id){
       document.getElementById('f_amount').focus();
       return;
     }
-    c.debt = Math.max(0, Number(c.debt||0) - amt);
-    persistCustomers();
+    adjustCustomerRemote(c.id, fresh=>{
+      const updated = cloneCustomerForEdit(fresh);
+      updated.debt = Math.max(0, Number(updated.debt||0) - amt);
+      return updated;
+    }).then(()=>render());
     state.sales.push({id:uid(), date:todayISO(), amount:amt, customerId:c.id, note:'รับชำระหนี้', createdAt: Date.now()});
     persistSales();
     closeModal();
@@ -2162,8 +2555,11 @@ function openCylinderReturnPrompt(id){
       document.getElementById('qtyError').style.display = 'block';
       return;
     }
-    removeFromCustomerGasBreakdown(c, items);
-    persistCustomers();
+    adjustCustomerRemote(c.id, fresh=>{
+      const updated = cloneCustomerForEdit(fresh);
+      removeFromCustomerGasBreakdown(updated, items);
+      return updated;
+    }).then(()=>render());
     items.forEach(item=>{ inventoryAddEmpty(item.size, item.brand, item.qty); });
     persistInventory();
     closeModal();
@@ -2202,8 +2598,11 @@ function openAddDebtPrompt(id){
       return;
     }
     const note = document.getElementById('f_note').value.trim();
-    c.debt = Number(c.debt||0) + amt;
-    persistCustomers();
+    adjustCustomerRemote(c.id, fresh=>{
+      const updated = cloneCustomerForEdit(fresh);
+      updated.debt = Number(updated.debt||0) + amt;
+      return updated;
+    }).then(()=>render());
     state.sales.push({id:uid(), date:todayISO(), amount:amt, customerId:c.id, note: note||'เพิ่มยอดค้างชำระ', unpaid:true, createdAt: Date.now()});
     persistSales();
     closeModal();
@@ -2249,6 +2648,7 @@ function renderSales(){
         </div>
         <div class="mono" style="color:var(--green);font-size:16px;">+฿${fmtMoney(s.amount)}</div>
       </div>
+      ${s.otherItems && s.otherItems.length? `<div class="rem-meta" style="margin-top:2px;">🧰 ${otherItemsSummary(s.otherItems)}</div>` : ''}
       <div class="btnrow" style="margin-top:6px;">
         <button class="btn ghost small" data-edit-sale="${s.id}">แก้ไข</button>
         <button class="btn ghost small" data-bill-sale="${s.id}">🧾 บิล</button>
@@ -2278,6 +2678,7 @@ function renderDailyDeliveryList(){
         <div style="font-weight:700;">${cust? escapeHtml(cust.name) : (s.note||'ไม่ระบุชื่อ')}</div>
         <div class="mono" style="color:var(--green);">฿${fmtMoney(s.amount)}</div>
       </div>
+      ${s.otherItems && s.otherItems.length? `<div class="rem-meta" style="margin-top:2px;">🧰 ${otherItemsSummary(s.otherItems)}</div>` : ''}
       <div class="btnrow" style="margin-top:6px;">
         ${Number(s.gasQty||0)>0? `<span class="tag gas">🛢️ ${s.gasQty} ถัง</span>` : ''}
         <span class="tag ${s.unpaid?'debt':'paid'}" data-toggle-unpaid="${s.id}" style="cursor:pointer;">${s.unpaid? '❗ ค้างจ่าย':'✓ จ่ายแล้ว'}</span>
@@ -2352,7 +2753,6 @@ function openSaleForm(presetCustomerId, editId){
   const initialCustomerId = editing? editing.customerId : presetCustomerId;
   const initialCust = initialCustomerId? state.customers.find(c=>c.id===initialCustomerId) : null;
   const presetCust = (!editing && presetCustomerId)? state.customers.find(c=>c.id===presetCustomerId) : null;
-  const existingBreakdown = editing? (editing.gasBreakdown||{}) : {};
   const body = `
     <h3>${editing? 'แก้ไขรายการขาย' : (presetCust? 'สั่งอีกรอบ — '+escapeHtml(presetCust.name) : 'บันทึกยอดขาย / การส่งของ')}</h3>
     <form class="panel" id="saleForm" novalidate>
@@ -2363,7 +2763,8 @@ function openSaleForm(presetCustomerId, editId){
         <input type="hidden" id="f_customer" value="${initialCustomerId||''}">
         <div id="saleCustSuggestions" style="margin-top:6px;"></div>
       </div>
-      <div class="field"><label>จำนวนถังแต่ละขนาด</label>${gasSizeInputsHtml('sale', existingBreakdown)}</div>
+      <div class="field"><label>จำนวนถังแต่ละขนาด</label>${lineItemBuilderHtml('sale', editing? breakdownToLineItems(editing.gasBreakdown) : [])}</div>
+      <div class="field"><label>สินค้าอื่นๆ (ถ้ามี)</label>${otherProductLineBuilderHtml('saleOtherLine', editing? (editing.otherItems||[]) : [])}</div>
       <div class="field">
         <label style="display:flex;align-items:center;gap:8px;font-weight:400;"><input type="checkbox" id="f_pickup" style="width:auto;" ${editing && editing.pickup?'checked':''}> 🏪 ลูกค้ามารับเองที่ร้าน (มีส่วนลด)</label>
       </div>
@@ -2385,6 +2786,8 @@ function openSaleForm(presetCustomerId, editId){
       </div>
     </form>`;
   showModal(body);
+  renderLineItemsBox('sale');
+  renderOtherLineItemsBox('saleOtherLine');
 
   const custSearchInput = document.getElementById('f_saleCustSearch');
   const custSuggestBox = document.getElementById('saleCustSuggestions');
@@ -2408,9 +2811,9 @@ function openSaleForm(presetCustomerId, editId){
   });
 
   document.getElementById('useSuggestedPriceBtnSale').addEventListener('click', ()=>{
-    const b = readGasSizeInputs('sale');
+    const b = window._lineBuilders['sale']||[];
     const pickup = document.getElementById('f_pickup').checked;
-    document.getElementById('f_amount').value = computeSuggestedPrice(b, pickup);
+    document.getElementById('f_amount').value = computeSuggestedPrice(b, pickup) + sumOtherLineItems('saleOtherLine');
   });
   if(editing){
     document.getElementById('deleteSaleBtn').addEventListener('click', ()=>{
@@ -2443,7 +2846,8 @@ function openSaleForm(presetCustomerId, editId){
         customerId = newCust.id;
       }
     }
-    const breakdown = readGasSizeInputs('sale');
+    const breakdown = (window._lineBuilders['sale']||[]).slice();
+    const otherItems = (window._otherLineBuilders['saleOtherLine']||[]).slice();
     let note = document.getElementById('f_note').value.trim();
     if(!customerId && !typedName && !note) note = 'ลูกค้าหน้าร้าน';
     const data = {
@@ -2453,6 +2857,7 @@ function openSaleForm(presetCustomerId, editId){
       note,
       gasQty: sumGasBreakdown(breakdown),
       gasBreakdown: breakdown,
+      otherItems,
       pickup: document.getElementById('f_pickup').checked,
       unpaid: document.getElementById('f_unpaid').checked,
       cylinderPending: document.getElementById('f_cylpending').checked
@@ -2462,12 +2867,12 @@ function openSaleForm(presetCustomerId, editId){
       state.sales.push({ id:uid(), ...data, createdAt: Date.now() });
       applyDeliveryToInventory(data.gasBreakdown, data.cylinderPending);
       if(customerId){
-        const c = state.customers.find(x=>x.id===customerId);
-        if(c){
-          if(data.unpaid && amt>0) c.debt = Number(c.debt||0) + amt;
-          if(data.cylinderPending && data.gasQty>0) addToCustomerGasBreakdown(c, breakdownToLineItems(breakdown));
-          persistCustomers();
-        }
+        adjustCustomerRemote(customerId, fresh=>{
+          const updated = cloneCustomerForEdit(fresh);
+          if(data.unpaid && amt>0) updated.debt = Number(updated.debt||0) + amt;
+          if(data.cylinderPending && data.gasQty>0) addToCustomerGasBreakdown(updated, breakdownToLineItems(breakdown));
+          return updated;
+        }).then(()=>render());
       }
     }
     persistSales();
@@ -2772,9 +3177,10 @@ function shareOrDownloadCanvas(canvas, filename){
    lists only what was actually ordered, no unused checkbox rows for every gas size */
 function buildItemsTableHtml(record, amount){
   const items = breakdownToLineItems(record.gasBreakdown);
-  const hasGasItems = items.length>0;
+  const otherItems = record.otherItems || [];
+  const hasAnyItems = items.length>0 || otherItems.length>0;
   const tdStyle = 'border:1px solid #232A22;padding:4px 6px;';
-  const tableRows = hasGasItems ? items.map(item=>{
+  const gasRows = items.map(item=>{
     const unitPrice = Number(state.gasPrices[item.size]||0);
     const brandTag = item.brand==='ptt' ? ' (🅿 ปตท)' : '';
     return `<tr>
@@ -2783,7 +3189,14 @@ function buildItemsTableHtml(record, amount){
       <td style="${tdStyle}text-align:center;">${fmtMoney(unitPrice)}</td>
       <td style="${tdStyle}text-align:right;">${fmtMoney(item.qty*unitPrice)}</td>
     </tr>`;
-  }).join('') : `<tr>
+  }).join('');
+  const otherRows = otherItems.map(item=>`<tr>
+      <td style="${tdStyle}">${escapeHtml(item.name)}</td>
+      <td style="${tdStyle}text-align:center;">${item.qty}</td>
+      <td style="${tdStyle}text-align:center;">${fmtMoney(item.price)}</td>
+      <td style="${tdStyle}text-align:right;">${fmtMoney(item.qty*item.price)}</td>
+    </tr>`).join('');
+  const tableRows = hasAnyItems ? (gasRows + otherRows) : `<tr>
       <td style="${tdStyle}">${escapeHtml(record.note || 'อื่นๆ')}</td>
       <td style="${tdStyle}text-align:center;">1</td>
       <td style="${tdStyle}text-align:center;">${fmtMoney(amount)}</td>
@@ -2814,7 +3227,7 @@ function buildBillHtml(record, kind, senderName, address, qrPayId, qrLineId){
   const dateStr = `${d.getDate()}${thAbbrevMonths[d.getMonth()]}.${String(d.getFullYear()+543).slice(-2)}`;
   const billNo = dateBase.replace(/-/g,'') + '-' + record.id.slice(-4).toUpperCase();
   const isEstimate = kind==='task';
-  const amount = kind==='sale' ? Number(record.amount||0) : computeSuggestedPrice(record.gasBreakdown, false);
+  const amount = kind==='sale' ? Number(record.amount||0) : computeSuggestedPrice(record.gasBreakdown, false) + sumOtherItemsTotal(record.otherItems);
   const billTitle = isEstimate ? 'ใบส่งของ (ประมาณการ)' : 'ใบเสร็จรับเงิน';
   const itemsTable = buildItemsTableHtml(record, amount);
 
@@ -2854,6 +3267,47 @@ function buildBillHtml(record, kind, senderName, address, qrPayId, qrLineId){
   `;
 }
 
+/* shorter ~100mm x 53mm variant of the receipt above, for when only a Peripage A6 (not the A9) is
+   on hand — same font scale as buildBillHtml (not enlarged like the door-hanger notice below), just
+   with the QR/scan-to-pay block dropped entirely so the whole thing fits in a shorter strip of paper */
+function buildBillHtmlCompact(record, kind, senderName, address){
+  const cust = record.customerId ? state.customers.find(c=>c.id===record.customerId) : null;
+  const custName = cust ? cust.name : (kind==='task' ? (record.customName||'ไม่ระบุชื่อ') : (record.note || 'ลูกค้าหน้าร้าน'));
+  const custPhone = cust ? cust.phone : (kind==='task' ? (record.phone||'') : '');
+  const dateBase = kind==='sale' ? record.date : todayISO();
+  const d = new Date(dateBase+'T00:00:00');
+  const thAbbrevMonths = ['มค','กพ','มีค','เมย','พค','มิย','กค','สค','กย','ตค','พย','ธค'];
+  const dateStr = `${d.getDate()}${thAbbrevMonths[d.getMonth()]}.${String(d.getFullYear()+543).slice(-2)}`;
+  const billNo = dateBase.replace(/-/g,'') + '-' + record.id.slice(-4).toUpperCase();
+  const isEstimate = kind==='task';
+  const amount = kind==='sale' ? Number(record.amount||0) : computeSuggestedPrice(record.gasBreakdown, false) + sumOtherItemsTotal(record.otherItems);
+  const billTitle = isEstimate ? 'ใบส่งของ (ประมาณการ)' : 'ใบเสร็จรับเงิน';
+  const itemsTable = buildItemsTableHtml(record, amount);
+
+  return `
+  <div style="text-align:center;">
+    <div style="font-weight:bold;font-size:1.3em;">${escapeHtml(SHOP_INFO.name)}</div>
+    <div style="font-size:0.78em;color:#333;margin-top:2px;">${SHOP_INFO.staff.map(p=>`${escapeHtml(p.name)} ${escapeHtml(p.phone)}`).join(' · ')}</div>
+    <div style="font-size:0.75em;color:#333;margin-top:1px;">${escapeHtml(SHOP_INFO.address)}</div>
+  </div>
+  <div style="border-top:1px dashed #232A22;margin:8px 0;"></div>
+  <div style="display:flex;justify-content:space-between;font-size:0.78em;color:#333;">
+    <span>${billTitle}</span><span>เลขที่ ${billNo} · ${dateStr}</span>
+  </div>
+  <div style="margin-top:8px;font-size:0.92em;">
+    <b>ลูกค้า:</b> ${escapeHtml(custName)}${custPhone? ' · โทร '+escapeHtml(custPhone) : ''}
+    ${address? `<div style="margin-top:2px;">${escapeHtml(address)}</div>` : ''}
+  </div>
+  <div style="border-top:1px dashed #232A22;margin:8px 0;"></div>
+  ${itemsTable}
+  <div style="border-top:1px dashed #232A22;margin-top:6px;padding-top:6px;display:flex;justify-content:space-between;font-weight:bold;font-size:1.05em;">
+    <span>รวม</span><span>฿${fmtMoney(amount)}</span>
+  </div>
+  <div style="font-size:0.72em;color:#5C6255;text-align:right;">(${thaiBahtText(amount)})</div>
+  <div style="text-align:right;font-size:0.8em;color:#333;margin-top:8px;">ผู้ส่งของ ${escapeHtml(senderName||'')}</div>
+  `;
+}
+
 /* "door-hanger" notice — printed at ~105mm wide (Peripage A6 photo paper) and taped to the gas tank
    when nobody's home, so the customer knows what was delivered, how much is owed, and can scan-to-pay
    right there without having to be around when the delivery happened. */
@@ -2863,7 +3317,7 @@ function buildNoticeCardHtml(record, kind, senderName, address, qrPayId, qrLineI
   const now = new Date();
   const thAbbrevMonths = ['มค','กพ','มีค','เมย','พค','มิย','กค','สค','กย','ตค','พย','ธค'];
   const dateTimeStr = `${now.getDate()}${thAbbrevMonths[now.getMonth()]}.${String(now.getFullYear()+543).slice(-2)} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')} น.`;
-  const amount = kind==='sale' ? Number(record.amount||0) : computeSuggestedPrice(record.gasBreakdown, false);
+  const amount = kind==='sale' ? Number(record.amount||0) : computeSuggestedPrice(record.gasBreakdown, false) + sumOtherItemsTotal(record.otherItems);
   const itemsTable = buildItemsTableHtml(record, amount);
 
   // shortened to ~2/3 the length of the earlier version: no LINE QR (payment QR only), lines merged
@@ -2902,7 +3356,8 @@ function chooseBillType(){
     const body = `
       <h3>เลือกประเภทเอกสาร</h3>
       <div class="btnrow" style="flex-direction:column;align-items:stretch;gap:8px;">
-        <button type="button" class="btn primary" data-bill-type="receipt">🧾 ใบเสร็จรับเงิน</button>
+        <button type="button" class="btn primary" data-bill-type="receipt">🧾 ใบเสร็จรับเงิน (100x80mm)</button>
+        <button type="button" class="btn primary" data-bill-type="receipt_small">🧾 ใบเสร็จเล็ก 100x53mm (ไม่มี QR, สำหรับ Peripage A6)</button>
         <button type="button" class="btn primary" data-bill-type="notice">📌 ใบปิดแจ้งหนี้ (ติดถังแก๊ส)</button>
       </div>
       <div class="btnrow" style="margin-top:12px;">
@@ -2926,28 +3381,34 @@ async function generateAndShareBill(record, kind, triggerBtn){
   const billType = await chooseBillType();
   if(billType===null) return; // user cancelled
   const isNotice = billType==='notice';
+  const isCompactReceipt = billType==='receipt_small';
   const details = await pickBillDetails(record, kind);
   if(details===null) return; // user cancelled
   const { senderName, address } = details;
   if(triggerBtn){ triggerBtn.textContent = '⏳ กำลังสร้าง...'; triggerBtn.disabled = true; }
-  const widthPx = isNotice ? 420 : 480; // notice card targets ~105mm-wide Peripage A6 paper; receipt targets ~100mm
+  const widthPx = isNotice ? 420 : 480; // notice card targets ~105mm-wide Peripage A6 paper; receipts target ~100mm
   const qrPayId = 'qrPay_' + uid();
   const qrLineId = 'qrLine_' + uid();
   const container = document.createElement('div');
   container.style.cssText = `position:fixed;left:-9999px;top:0;width:${widthPx}px;background:#ffffff;color:#232A22;font-family:'Sarabun',sans-serif;padding:14px;line-height:1.5;`;
   container.innerHTML = isNotice
     ? buildNoticeCardHtml(record, kind, senderName, address, qrPayId, qrLineId)
-    : buildBillHtml(record, kind, senderName, address, qrPayId, qrLineId);
+    : isCompactReceipt
+      ? buildBillHtmlCompact(record, kind, senderName, address)
+      : buildBillHtml(record, kind, senderName, address, qrPayId, qrLineId);
   document.body.appendChild(container);
   const docLabel = isNotice ? 'ใบแจ้งหนี้' : 'บิล';
   try{
-    const amount = kind==='sale' ? Number(record.amount||0) : computeSuggestedPrice(record.gasBreakdown, false);
+    const amount = kind==='sale' ? Number(record.amount||0) : computeSuggestedPrice(record.gasBreakdown, false) + sumOtherItemsTotal(record.otherItems);
     const qrSize = isNotice ? 240 : 120; // notice card is printed small and taped outdoors — QR needs to stay scannable
-    new QRCode(document.getElementById(qrPayId), { text: buildPromptPayPayload(SHOP_INFO.promptPayTarget, kind==='sale'? amount : 0), width:qrSize, height:qrSize });
-    // the notice card only ever has the payment QR — LINE QR only exists in the regular receipt's markup
-    if(!isNotice && SHOP_INFO.lineId){
-      const lineQrEl = document.getElementById(qrLineId);
-      if(lineQrEl) new QRCode(lineQrEl, { text: SHOP_INFO.lineId, width:qrSize, height:qrSize });
+    // the compact 100x53mm receipt has no QR section in its markup at all — skip QR generation entirely
+    if(!isCompactReceipt){
+      new QRCode(document.getElementById(qrPayId), { text: buildPromptPayPayload(SHOP_INFO.promptPayTarget, kind==='sale'? amount : 0), width:qrSize, height:qrSize });
+      // the notice card only ever has the payment QR — LINE QR only exists in the regular receipt's markup
+      if(!isNotice && SHOP_INFO.lineId){
+        const lineQrEl = document.getElementById(qrLineId);
+        if(lineQrEl) new QRCode(lineQrEl, { text: SHOP_INFO.lineId, width:qrSize, height:qrSize });
+      }
     }
     const canvas = await html2canvas(container, { backgroundColor:'#ffffff', width: widthPx, useCORS:true });
     const cust = record.customerId ? state.customers.find(c=>c.id===record.customerId) : null;
@@ -3252,6 +3713,7 @@ function renderTasks(){
         </div>
         <div class="rem-meta">${getTaskUrgencyLabel(urgencyState)} · ${formatElapsed(startedAt)}</div>
         ${t.gasBreakdown && sumGasBreakdown(t.gasBreakdown)>0? `<div class="rem-meta">🛢️ ${gasBreakdownSummary(t.gasBreakdown)}</div>` : ''}
+        ${t.otherItems && t.otherItems.length? `<div class="rem-meta">🧰 ${otherItemsSummary(t.otherItems)}</div>` : ''}
         ${phone? `<div class="rem-meta">📞 <a href="tel:${escapeAttr(phone)}" style="color:var(--orange-dark);font-weight:600;">${escapeHtml(phone)}</a></div>` : ''}
         ${t.note? `<div class="rem-meta">📝 ${escapeHtml(t.note)}</div>` : ''}
         <div class="btnrow">
@@ -3266,6 +3728,17 @@ function renderTasks(){
     </div>`;
   }).join('');
   return intro + notifyBanner + summaryBar + searchBar + toggleBtn + panel + rows;
+}
+
+// when a task is linked to an existing customer, their phone/address/soi/moo/landmark live on the
+// CUSTOMER record, not the task — this renders a read-only summary of that data so it never looks
+// like it "disappeared" just because the editable copies are hidden in this form
+function taskCustInfoBlockHtml(cust){
+  if(!cust) return '';
+  return `
+    <div class="rem-meta">📞 ${cust.phone? escapeHtml(cust.phone) : 'ไม่มีเบอร์'} · 📍 ${cust.address? escapeHtml(cust.address) : 'ไม่มีที่อยู่/ลิงก์แผนที่'}</div>
+    <div class="rem-meta">ซอย ${cust.soi? escapeHtml(cust.soi) : '-'} · หมู่ ${cust.moo? escapeHtml(cust.moo) : '-'} · จุดสังเกต ${cust.landmark? escapeHtml(cust.landmark) : '-'}</div>
+  `;
 }
 
 function openTaskForm(editId){
@@ -3286,6 +3759,12 @@ function openTaskForm(editId){
         <div id="taskCustSuggestions" style="margin-top:6px;"></div>
       </div>
       <div class="field"><label>ถังที่จะส่ง</label>${lineItemBuilderHtml('taskLine', editing? breakdownToLineItems(editing.gasBreakdown) : [])}</div>
+      <div class="field"><label>สินค้าอื่นๆ (ถ้ามี)</label>${otherProductLineBuilderHtml('taskOtherLine', editing? (editing.otherItems||[]) : [])}</div>
+      <div id="existingCustInfoBlock" class="stamp-card" style="margin-bottom:10px;${editingCust? '':'display:none;'}">
+        <div class="rem-meta" style="font-weight:700;margin-bottom:4px;">ข้อมูลลูกค้า (ไม่ได้หายไปไหน — แก้ไขได้ที่หน้าลูกค้าโดยตรง)</div>
+        <div id="existingCustInfoContent">${taskCustInfoBlockHtml(editingCust)}</div>
+        <button type="button" class="btn ghost small" id="editLinkedCustBtn" style="margin-top:6px;">✏️ แก้ไขข้อมูลลูกค้าคนนี้</button>
+      </div>
       <div id="newCustomerFields" style="${editingCust? 'display:none;':''}">
         <div class="field-row">
           <div class="field"><label>เบอร์โทร (ถ้ามี)</label><input id="f_taskPhone" value="${editing? escapeAttr(editing.phone||''):''}"></div>
@@ -3334,6 +3813,7 @@ function openTaskForm(editId){
     </form>`;
   showModal(body);
   renderLineItemsBox('taskLine');
+  renderOtherLineItemsBox('taskOtherLine');
 
   // button-only urgency picker — emoji only appear once the popover opens. Kept form-local (no
   // showModal/closeModal calls, which would wipe out the rest of this very form since the app
@@ -3369,6 +3849,15 @@ function openTaskForm(editId){
   const nameInput = document.getElementById('f_taskCustName');
   const suggestBox = document.getElementById('taskCustSuggestions');
   const newFieldsDiv = document.getElementById('newCustomerFields');
+  const custInfoBlock = document.getElementById('existingCustInfoBlock');
+  const custInfoContent = document.getElementById('existingCustInfoContent');
+  const editLinkedCustBtn = document.getElementById('editLinkedCustBtn');
+  if(editLinkedCustBtn){
+    editLinkedCustBtn.addEventListener('click', ()=>{
+      const cid = document.getElementById('f_taskCustomerId').value;
+      if(cid){ closeModal(); openCustomerForm(cid); }
+    });
+  }
   function renderSuggestions(){
     const q = nameInput.value.trim().toLowerCase();
     if(!q){ suggestBox.innerHTML=''; return; }
@@ -3381,12 +3870,15 @@ function openTaskForm(editId){
         nameInput.value = picked.name;
         suggestBox.innerHTML = '';
         newFieldsDiv.style.display = 'none';
+        custInfoContent.innerHTML = taskCustInfoBlockHtml(picked);
+        custInfoBlock.style.display = '';
       });
     });
   }
   nameInput.addEventListener('input', ()=>{
     document.getElementById('f_taskCustomerId').value = '';
     newFieldsDiv.style.display = '';
+    custInfoBlock.style.display = 'none';
     renderSuggestions();
   });
 
@@ -3423,6 +3915,7 @@ function openTaskForm(editId){
       landmark: customerId? '' : document.getElementById('f_taskLandmark').value.trim(),
       urgencyMode: document.getElementById('f_taskUrgencyMode').value,
       gasBreakdown: (window._lineBuilders['taskLine']||[]).slice(),
+      otherItems: (window._otherLineBuilders['taskOtherLine']||[]).slice(),
       note: document.getElementById('f_taskNote').value.trim()
     };
     if(editing){ Object.assign(editing, data); }
@@ -3443,6 +3936,7 @@ function openTaskCompleteForm(taskId){
     <h3>ส่งเสร็จแล้ว — ${escapeHtml(displayName)}</h3>
     <form class="panel" id="taskCompleteForm" novalidate>
       <div class="field"><label>ถังที่ส่งจริง</label>${lineItemBuilderHtml('taskCompleteLine', breakdownToLineItems(t.gasBreakdown))}</div>
+      <div class="field"><label>สินค้าอื่นๆ (ถ้ามี)</label>${otherProductLineBuilderHtml('taskCompleteOtherLine', t.otherItems||[])}</div>
       <div class="field">
         <label style="display:flex;align-items:center;gap:8px;font-weight:400;"><input type="checkbox" id="f_pickup" style="width:auto;"> 🏪 ลูกค้ามารับเองที่ร้าน (ลด ${state.pickupDiscount[15]||0} บาท/ถัง สำหรับ 15-48kg, ${state.pickupDiscount[4]||0} บาท/ถัง สำหรับ 4-7kg)</label>
       </div>
@@ -3467,14 +3961,16 @@ function openTaskCompleteForm(taskId){
     </form>`;
   showModal(body);
   renderLineItemsBox('taskCompleteLine');
+  renderOtherLineItemsBox('taskCompleteOtherLine');
   document.getElementById('useSuggestedPriceBtn').addEventListener('click', ()=>{
     const b = window._lineBuilders['taskCompleteLine']||[];
     const pickup = document.getElementById('f_pickup').checked;
-    document.getElementById('f_amount').value = computeSuggestedPrice(b, pickup);
+    document.getElementById('f_amount').value = computeSuggestedPrice(b, pickup) + sumOtherLineItems('taskCompleteOtherLine');
   });
   document.getElementById('taskCompleteForm').addEventListener('submit', e=>{
     e.preventDefault();
     const breakdown = (window._lineBuilders['taskCompleteLine']||[]).slice();
+    const otherItems = (window._otherLineBuilders['taskCompleteOtherLine']||[]).slice();
     const gasQty = sumGasBreakdown(breakdown);
     const amt = Number(document.getElementById('f_amount').value)||0;
     const unpaid = document.getElementById('f_unpaid').checked;
@@ -3490,6 +3986,9 @@ function openTaskCompleteForm(taskId){
         name: displayName,
         phone: t.phone || '',
         address: t.address || '',
+        soi: t.soi || '',
+        moo: t.moo || '',
+        landmark: t.landmark || '',
         gasCylindersBreakdown: cylinderPending? breakdownToLineItems(breakdown) : [],
         gasCylinders: cylinderPending? gasQty : 0,
         debt: unpaid? amt : 0,
@@ -3500,24 +3999,24 @@ function openTaskCompleteForm(taskId){
       finalCustomerId = newCust.id;
     }
 
-    if(amt>0 || gasQty>0){
+    if(amt>0 || gasQty>0 || otherItems.length){
       state.sales.push({
         id: uid(), date: todayISO(), amount: amt,
         customerId: finalCustomerId,
         note: finalCustomerId? '' : displayName,
-        gasQty, gasBreakdown: breakdown, unpaid, cylinderPending,
+        gasQty, gasBreakdown: breakdown, otherItems, unpaid, cylinderPending,
         createdAt: Date.now()
       });
       persistSales();
     }
     if(gasQty>0) applyDeliveryToInventory(breakdown, cylinderPending);
     if(t.customerId && !saveAsCustomer){
-      const c = state.customers.find(x=>x.id===t.customerId);
-      if(c){
-        if(unpaid && amt>0) c.debt = Number(c.debt||0) + amt;
-        if(cylinderPending && gasQty>0) addToCustomerGasBreakdown(c, breakdownToLineItems(breakdown));
-        persistCustomers();
-      }
+      adjustCustomerRemote(t.customerId, fresh=>{
+        const updated = cloneCustomerForEdit(fresh);
+        if(unpaid && amt>0) updated.debt = Number(updated.debt||0) + amt;
+        if(cylinderPending && gasQty>0) addToCustomerGasBreakdown(updated, breakdownToLineItems(breakdown));
+        return updated;
+      }).then(()=>render());
     }
     state.tasks = state.tasks.filter(x=>x.id!==taskId);
     persistTasks();
@@ -3727,6 +4226,72 @@ document.getElementById('modalRoot').addEventListener('click', e=>{
   }
 });
 
+/* ---------------- reusable "สินค้าอื่นๆ" line-item builder: same select -> qty -> ➕ pattern as the
+   gas builder above, but for non-gas products from state.otherProducts (hoses, valves, new-cylinder
+   sales, etc.) — shared between the Tasks "เพิ่มงานส่งของ"/"ส่งเสร็จแล้ว" forms and the Sales
+   "บันทึกยอดขาย" form so pricing only needs to live in one place (the dashboard's ราคาสินค้าทั้งหมด) ---------------- */
+window._otherLineBuilders = window._otherLineBuilders || {};
+function otherProductLineBuilderHtml(prefix, initialItems){
+  window._otherLineBuilders[prefix] = (initialItems || []).map(i=>({
+    productId: i.productId, name: i.name, unit: i.unit||'ชิ้น', price: Number(i.price||0), qty: Number(i.qty||0)
+  })).filter(i=>i.qty>0);
+  if(!state.otherProducts.length){
+    return `<div class="rem-meta">ยังไม่มีสินค้าอื่นในระบบ (เพิ่มได้ที่การ์ด "ราคาสินค้าทั้งหมด" ในแดชบอร์ด)</div><div id="${prefix}_otherlist" style="margin-top:8px;"></div>`;
+  }
+  return `
+    <div class="field-row" style="align-items:flex-end;">
+      <div class="field" style="flex:2;">
+        <label style="font-size:11px;">สินค้า</label>
+        <select id="${prefix}_otherProduct">${state.otherProducts.map(p=>`<option value="${escapeAttr(p.id)}">${escapeHtml(p.name)} (฿${fmtMoney(p.price)}/${escapeHtml(p.unit||'ชิ้น')})</option>`).join('')}</select>
+      </div>
+      <div class="field" style="flex:1;">
+        <label style="font-size:11px;">จำนวน</label>
+        <input type="number" min="1" id="${prefix}_otherQty" placeholder="1" value="1">
+      </div>
+      <button type="button" class="btn primary" data-add-other-line="${prefix}" style="margin-bottom:11px;">➕</button>
+    </div>
+    <div id="${prefix}_otherlist" style="margin-top:8px;"></div>
+  `;
+}
+function renderOtherLineItemsBox(prefix){
+  const box = document.getElementById(`${prefix}_otherlist`);
+  if(!box) return;
+  const items = window._otherLineBuilders[prefix] || [];
+  if(!items.length){ box.innerHTML = '<div class="rem-meta">ยังไม่ได้เพิ่มสินค้าอื่น</div>'; return; }
+  box.innerHTML = items.map((l,i)=>`
+    <div class="card" style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;margin-bottom:4px;">
+      <div>🧰 ${escapeHtml(l.name)} × ${l.qty} ${escapeHtml(l.unit||'ชิ้น')} (฿${fmtMoney(l.price*l.qty)})</div>
+      <button type="button" class="btn danger small" data-remove-other-line-item="${prefix}|${i}">ลบ</button>
+    </div>`).join('');
+}
+function sumOtherLineItems(prefix){
+  const items = window._otherLineBuilders[prefix] || [];
+  return items.reduce((a,i)=>a + Number(i.price||0)*Number(i.qty||0), 0);
+}
+document.getElementById('modalRoot').addEventListener('click', e=>{
+  const addOtherBtn = e.target.closest('[data-add-other-line]');
+  if(addOtherBtn){
+    const prefix = addOtherBtn.dataset.addOtherLine;
+    const productId = document.getElementById(`${prefix}_otherProduct`).value;
+    const qty = Number(document.getElementById(`${prefix}_otherQty`).value)||0;
+    const product = state.otherProducts.find(p=>p.id===productId);
+    if(qty>0 && product){
+      window._otherLineBuilders[prefix] = window._otherLineBuilders[prefix] || [];
+      const existing = window._otherLineBuilders[prefix].find(l=>l.productId===productId);
+      if(existing) existing.qty += qty; else window._otherLineBuilders[prefix].push({ productId, name: product.name, unit: product.unit, price: product.price, qty });
+      document.getElementById(`${prefix}_otherQty`).value = 1;
+      renderOtherLineItemsBox(prefix);
+    }
+    return;
+  }
+  const removeOtherBtn = e.target.closest('[data-remove-other-line-item]');
+  if(removeOtherBtn){
+    const [prefix, idxStr] = removeOtherBtn.dataset.removeOtherLineItem.split('|');
+    window._otherLineBuilders[prefix].splice(Number(idxStr), 1);
+    renderOtherLineItemsBox(prefix);
+  }
+});
+
 function openDangerousDeleteConfirm(title, itemName, onConfirm){
   const body = `
     <h3>⚠️ ${title}</h3>
@@ -3758,6 +4323,20 @@ function attachHandlers(){
   document.querySelectorAll('[data-goto-tab]').forEach(el=>el.addEventListener('click', ()=> switchTab(el.dataset.gotoTab)));
   const editPricesBtn = document.getElementById('editPricesBtn');
   if(editPricesBtn) editPricesBtn.addEventListener('click', openEditPricesForm);
+  const otherProductSelect = document.getElementById('otherProductSelect');
+  if(otherProductSelect) otherProductSelect.addEventListener('change', ()=>{ selectedOtherProductId = otherProductSelect.value; render(); });
+  const addOtherProductBtn = document.getElementById('addOtherProductBtn');
+  if(addOtherProductBtn) addOtherProductBtn.addEventListener('click', ()=>openOtherProductForm(null));
+  document.querySelectorAll('[data-edit-other-product]').forEach(b=>b.addEventListener('click', ()=>openOtherProductForm(b.dataset.editOtherProduct)));
+  document.querySelectorAll('[data-del-other-product]').forEach(b=>b.addEventListener('click', ()=>{
+    const p = state.otherProducts.find(x=>x.id===b.dataset.delOtherProduct);
+    if(p && confirm(`ลบสินค้า "${p.name}" ใช่หรือไม่?`)){
+      state.otherProducts = state.otherProducts.filter(x=>x.id!==p.id);
+      if(selectedOtherProductId===p.id) selectedOtherProductId = null;
+      persistOtherProducts();
+      render();
+    }
+  }));
   const editInventoryBtn = document.getElementById('editInventoryBtn');
   if(editInventoryBtn) editInventoryBtn.addEventListener('click', openEditInventoryForm);
   document.querySelectorAll('[data-edit-inv]').forEach(b=>b.addEventListener('click', ()=>openQuickInventoryEdit(b.dataset.editInv)));
@@ -3765,7 +4344,12 @@ function attachHandlers(){
   if(addTransactionBtn) addTransactionBtn.addEventListener('click', openTransactionForm);
   const openDailySummaryBtn = document.getElementById('openDailySummaryBtn');
   if(openDailySummaryBtn) openDailySummaryBtn.addEventListener('click', openDailySummaryModal);
-  document.querySelectorAll('[data-show-pl]').forEach(el=>el.addEventListener('click', ()=>openPLDetailModal(el.dataset.showPl)));
+  document.querySelectorAll('[data-show-pl]').forEach(el=>el.addEventListener('click', ()=>{
+    // open the detail modal already set to whichever period the dashboard card is currently showing
+    plDetailPeriod = dashboardPLPeriod;
+    openPLDetailModal(el.dataset.showPl);
+  }));
+  document.querySelectorAll('[data-dash-pl-period]').forEach(b=>b.addEventListener('click', ()=>{ dashboardPLPeriod = b.dataset.dashPlPeriod; render(); }));
   const dashboardSortSelect = document.getElementById('dashboardSortSelect');
   if(dashboardSortSelect) dashboardSortSelect.addEventListener('change', ()=>{ dashboardSort = dashboardSortSelect.value; render(); });
   document.querySelectorAll('[data-toggle-dash-cust]').forEach(el=>el.addEventListener('click', ()=>{
@@ -3909,6 +4493,10 @@ function attachHandlers(){
   if(importOpenBtn) importOpenBtn.addEventListener('click', openImportForm);
   const exportCsvBtn = document.getElementById('exportCsvBtn');
   if(exportCsvBtn) exportCsvBtn.addEventListener('click', exportCustomersCSV);
+  const openDupeCheckBtn = document.getElementById('openDupeCheckBtn');
+  if(openDupeCheckBtn) openDupeCheckBtn.addEventListener('click', openDuplicateCustomersModal);
+  const openManualMergeBtn = document.getElementById('openManualMergeBtn');
+  if(openManualMergeBtn) openManualMergeBtn.addEventListener('click', openManualMergePicker);
   const exportBackupBtn = document.getElementById('exportBackupBtn');
   if(exportBackupBtn) exportBackupBtn.addEventListener('click', exportFullBackup);
   document.querySelectorAll('[data-edit-cust]').forEach(b=>b.addEventListener('click', ()=>openCustomerForm(b.dataset.editCust)));
@@ -3929,6 +4517,7 @@ function attachHandlers(){
     if(expandedHistoryIds.has(id)) expandedHistoryIds.delete(id); else expandedHistoryIds.add(id);
     render();
   }));
+  document.querySelectorAll('[data-edit-history-sale]').forEach(el=>el.addEventListener('click', ()=>openSaleForm(null, el.dataset.editHistorySale)));
   const custSearchInput = document.getElementById('custSearchInput');
   if(custSearchInput) custSearchInput.addEventListener('input', ()=>{
     customerSearchQuery = custSearchInput.value;
