@@ -837,6 +837,17 @@ function gasBreakdownSummary(b){
     return `แก๊ส${sz}kg${brandTag} จำนวน ${qty} ถัง`;
   }).join(', ');
 }
+// replaces the generic 🛢️ emoji with real color-coded tank icon(s) — blue for ธรรมดา, green for ปตท —
+// picked from whichever brand(s) actually appear in a gas breakdown (array or size-keyed object).
+// Falls back to '' (caller should keep the 🛢️ emoji) when there's no breakdown data to read a brand from.
+function gasBrandIconsHtml(b, size){
+  size = size || 16;
+  if(!b) return '';
+  const items = Array.isArray(b) ? b : GAS_SIZES.map(sz=>({ size:sz, brand:getBreakdownBrand(b[sz]), qty:getBreakdownQty(b[sz]) }));
+  const brandsPresent = [...new Set(items.filter(i=>Number(i.qty||0)>0).map(i=>i.brand||'regular'))];
+  if(!brandsPresent.length) return '';
+  return brandsPresent.map(br=>iconImgHtml(tankIconSrc(br,'15'), size)).join('');
+}
 // summarizes an otherItems array (non-gas products picked via the "สินค้าอื่นๆ" line builder) for
 // display on task/sale cards, e.g. "สายแก๊ส ×2 (฿300), แหวนรัดสาย ×1 (฿10)"
 function otherItemsSummary(items){
@@ -2335,7 +2346,7 @@ function renderCustomerCard(c, opts){
       ${link? `<a class="maps-link" href="${link}" target="_blank" rel="noopener">🧭 นำทาง</a>` : ''}
     </div>
     <div class="btnrow">
-      ${Number(c.gasCylinders||0)>0? `<span class="tag gas">🛢️ ยืมถัง ${c.gasCylinders} ใบ</span>`:''}
+      ${Number(c.gasCylinders||0)>0? `<span class="tag gas">${gasBrandIconsHtml(c.gasCylindersBreakdown, 16) || '🛢️'} ยืมถัง ${c.gasCylinders} ใบ</span>`:''}
       ${Number(c.debt||0)>0? `<span class="tag debt">ค้างชำระ ฿${fmtMoney(c.debt)}</span>` : `<span class="tag paid">ไม่มีหนี้</span>`}
     </div>
     ${c.notes? `<div class="rem-meta" style="margin-top:8px;">📝 ${escapeHtml(c.notes)}</div>`:''}
@@ -2682,7 +2693,7 @@ function renderDailyDeliveryList(){
       </div>
       ${s.otherItems && s.otherItems.length? `<div class="rem-meta" style="margin-top:2px;">🧰 ${otherItemsSummary(s.otherItems)}</div>` : ''}
       <div class="btnrow" style="margin-top:6px;">
-        ${Number(s.gasQty||0)>0? `<span class="tag gas">🛢️ ${s.gasQty} ถัง</span>` : ''}
+        ${Number(s.gasQty||0)>0? `<span class="tag gas">${gasBrandIconsHtml(s.gasBreakdown, 16) || '🛢️'} ${s.gasQty} ถัง</span>` : ''}
         <span class="tag ${s.unpaid?'debt':'paid'}" data-toggle-unpaid="${s.id}" style="cursor:pointer;">${s.unpaid? '❗ ค้างจ่าย':'✓ จ่ายแล้ว'}</span>
         <span class="tag ${s.cylinderPending?'debt':'paid'}" data-toggle-cyl="${s.id}" style="cursor:pointer;">${s.cylinderPending? '❗ ค้างถัง':'✓ คืนถังแล้ว'}</span>
         <button class="btn ghost small" data-edit-sale="${s.id}">แก้ไข</button>
@@ -3718,7 +3729,7 @@ function renderTasks(){
           ${navLink? `<a class="btn ghost small" href="${navLink}" target="_blank" rel="noopener" style="text-decoration:none;flex-shrink:0;">🧭 นำทาง</a>` : ''}
         </div>
         <div class="rem-meta">${getTaskUrgencyLabel(urgencyState)} · ${formatElapsed(startedAt)}</div>
-        ${t.gasBreakdown && sumGasBreakdown(t.gasBreakdown)>0? `<div class="rem-meta">🛢️ ${gasBreakdownSummary(t.gasBreakdown)}</div>` : ''}
+        ${t.gasBreakdown && sumGasBreakdown(t.gasBreakdown)>0? `<div class="rem-meta">${gasBrandIconsHtml(t.gasBreakdown, 16) || '🛢️'} ${gasBreakdownSummary(t.gasBreakdown)}</div>` : ''}
         ${t.otherItems && t.otherItems.length? `<div class="rem-meta">🧰 ${otherItemsSummary(t.otherItems)}</div>` : ''}
         ${phone? `<div class="rem-meta">📞 <a href="tel:${escapeAttr(phone)}" style="color:var(--orange-dark);font-weight:600;">${escapeHtml(phone)}</a></div>` : ''}
         ${t.note? `<div class="rem-meta">📝 ${escapeHtml(t.note)}</div>` : ''}
