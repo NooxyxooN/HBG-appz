@@ -1,0 +1,32 @@
+{
+  "name": "ห้วยบอนแก๊ส - สมุดบัญชีร้าน",
+  "short_name": "ห้วยบอนแก๊ส",
+  "description": "แอปจัดการร้านแก๊ส: ลูกค้า งานส่ง สต็อกถัง ยอดขาย รับถัง",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F1EEE3",
+  "theme_color": "#DB6B2A",
+  "lang": "th",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
