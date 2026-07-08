@@ -491,6 +491,7 @@ async function init(){
   state.pickupDiscount = await loadData('pickupDiscount', {4:10,7:10,15:20,48:20});
   state.inventory = await loadData('inventory', emptyInventory());
   state.dailySummaries = await loadData('dailySummaries', {});
+  migrateNumericSoiMoo();
   state.loaded = true;
   document.getElementById('todayLabel').textContent = new Date().toLocaleDateString('th-TH',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
   render();
@@ -550,6 +551,28 @@ function openShareModal(){
       document.getElementById('copyUrlBtn').textContent = 'คัดลอกไม่สำเร็จ ลองคัดลอกด้วยมือ';
     });
   });
+}
+
+// one-time cleanup: old ซอย/หมู่ entries sometimes had text mixed in (e.g. "ซอย 5", "หมู่3 ")
+// — keep only the digits, per user request ("ผิดเดี๋ยวไปแก้ทีหลัง" if the number itself is wrong)
+function migrateNumericSoiMoo(){
+  let custChanged = false;
+  state.customers.forEach(c=>{
+    const newSoi = stripToDigits(c.soi);
+    const newMoo = stripToDigits(c.moo);
+    if(newSoi !== (c.soi||'')){ c.soi = newSoi; custChanged = true; }
+    if(newMoo !== (c.moo||'')){ c.moo = newMoo; custChanged = true; }
+  });
+  if(custChanged) persistCustomers();
+
+  let taskChanged = false;
+  state.tasks.forEach(t=>{
+    const newSoi = stripToDigits(t.soi);
+    const newMoo = stripToDigits(t.moo);
+    if(newSoi !== (t.soi||'')){ t.soi = newSoi; taskChanged = true; }
+    if(newMoo !== (t.moo||'')){ t.moo = newMoo; taskChanged = true; }
+  });
+  if(taskChanged) persistTasks();
 }
 
 /* ---------------- persistence helpers ---------------- */
@@ -763,6 +786,9 @@ function breakdownToLineItems(b){
 
 /* Urgency system: auto-escalates by elapsed time since timerStartAt, unless manually pinned */
 const URGENCY_AUTO_ICONS = { green:'🟢', yellow:'🟡', red:'🔴' };
+// used by the compact circle+popover urgency picker in the Add/Edit Task form
+const TASK_URGENCY_FORM_ICONS = { auto:'🟢🟡🔴', green:'🟢', yellow:'🟡', red:'🔴', paused:'🔵' };
+const TASK_URGENCY_FORM_LABELS = { auto:'อัตโนมัติ (ไล่สีตามเวลาที่รอ)', green:'เขียว (กำหนดเอง)', yellow:'เหลือง (กำหนดเอง)', red:'แดง (กำหนดเอง)', paused:'พักไว้ก่อน (รอ activate)' };
 const URGENCY_AUTO_LABELS = { green:'ปกติ (≤30 นาที)', yellow:'รอมานาน (30 นาที - 2ชม.30นาที)', red:'ค้างนาน (2ชม.30นาทีขึ้นไป)' };
 function getTaskUrgencyState(t){
   if(t.urgencyMode === 'paused') return 'paused';
@@ -1013,6 +1039,8 @@ function getSupplierNames(){
 // tasks) so the input fields can offer them back as a native <datalist> dropdown — same pattern as
 // the supplier-name autocomplete above — instead of making you retype the same soi/moo/landmark
 // for every new person who happens to live in the same area
+function stripToDigits(v){ return (v||'').toString().replace(/[^0-9]/g,''); }
+
 function getKnownFieldValues(field){
   const values = new Set();
   state.customers.forEach(c=>{ if(c[field]) values.add(c[field]); });
@@ -1970,13 +1998,13 @@ function openCustomerForm(id){
       </div>
       <div class="field-row">
         <div class="field">
-          <label>ซอย</label>
-          <input id="f_soi" list="soiList" value="${c? escapeAttr(c.soi||''):''}" placeholder="เช่น ซอย 5" autocomplete="off">
+          <label>ซอย (ตัวเลขเท่านั้น)</label>
+          <input id="f_soi" list="soiList" inputmode="numeric" pattern="[0-9]*" oninput="this.value=this.value.replace(/[^0-9]/g,'')" value="${c? escapeAttr(stripToDigits(c.soi)):''}" placeholder="เช่น 5" autocomplete="off">
           <datalist id="soiList">${soiOptions.map(v=>`<option value="${escapeAttr(v)}">`).join('')}</datalist>
         </div>
         <div class="field">
-          <label>หมู่</label>
-          <input id="f_moo" list="mooList" value="${c? escapeAttr(c.moo||''):''}" placeholder="เช่น หมู่ 3" autocomplete="off">
+          <label>หมู่ (ตัวเลขเท่านั้น)</label>
+          <input id="f_moo" list="mooList" inputmode="numeric" pattern="[0-9]*" oninput="this.value=this.value.replace(/[^0-9]/g,'')" value="${c? escapeAttr(stripToDigits(c.moo)):''}" placeholder="เช่น 3" autocomplete="off">
           <datalist id="mooList">${mooOptions.map(v=>`<option value="${escapeAttr(v)}">`).join('')}</datalist>
         </div>
       </div>
@@ -2042,8 +2070,8 @@ function openCustomerForm(id){
       name: document.getElementById('f_name').value.trim(),
       phone: document.getElementById('f_phone').value.trim(),
       address: document.getElementById('f_address').value.trim(),
-      soi: document.getElementById('f_soi').value.trim(),
-      moo: document.getElementById('f_moo').value.trim(),
+      soi: stripToDigits(document.getElementById('f_soi').value),
+      moo: stripToDigits(document.getElementById('f_moo').value),
       landmark: document.getElementById('f_landmark').value.trim(),
       gasCylindersBreakdown,
       gasCylinders: sumGasBreakdown(gasCylindersBreakdown),
@@ -3227,12 +3255,12 @@ function renderTasks(){
         ${phone? `<div class="rem-meta">📞 <a href="tel:${escapeAttr(phone)}" style="color:var(--orange-dark);font-weight:600;">${escapeHtml(phone)}</a></div>` : ''}
         ${t.note? `<div class="rem-meta">📝 ${escapeHtml(t.note)}</div>` : ''}
         <div class="btnrow">
-          <button class="btn primary small" data-complete-task="${t.id}">✅ ส่งเสร็จแล้ว</button>
           <button class="btn ghost small" data-edit-task="${t.id}">แก้ไข</button>
           <button class="btn ghost small" data-bill-task="${t.id}">🧾 บิล</button>
           ${urgencyState==='paused'? `<button class="btn primary small" style="background:var(--green);" data-reactivate-task="${t.id}">▶️ Activate</button>` : ''}
-          <button class="btn ghost small" data-add-task-reminder="${t.id}">🚨 เพิ่มแจ้งเตือน</button>
           <button class="btn danger small" data-del-task="${t.id}">ลบ</button>
+          <button class="btn ghost small" data-add-task-reminder="${t.id}">🚨 เพิ่มแจ้งเตือน</button>
+          <button class="btn primary small" data-complete-task="${t.id}" style="margin-left:auto;">✅ กดเมื่อส่งเสร็จ</button>
         </div>
       </div>
     </div>`;
@@ -3247,6 +3275,7 @@ function openTaskForm(editId){
   const soiOptions = getKnownFieldValues('soi');
   const mooOptions = getKnownFieldValues('moo');
   const landmarkOptions = getKnownFieldValues('landmark');
+  const initialUrgencyMode = (editing && editing.urgencyMode) ? editing.urgencyMode : 'auto';
   const body = `
     <h3>${editing? 'แก้ไขงานส่งของ' : 'เพิ่มงานส่งของ'}</h3>
     <form class="panel" id="taskForm" novalidate>
@@ -3256,6 +3285,7 @@ function openTaskForm(editId){
         <input type="hidden" id="f_taskCustomerId" value="${editingCust? editingCust.id : ''}">
         <div id="taskCustSuggestions" style="margin-top:6px;"></div>
       </div>
+      <div class="field"><label>ถังที่จะส่ง</label>${lineItemBuilderHtml('taskLine', editing? breakdownToLineItems(editing.gasBreakdown) : [])}</div>
       <div id="newCustomerFields" style="${editingCust? 'display:none;':''}">
         <div class="field-row">
           <div class="field"><label>เบอร์โทร (ถ้ามี)</label><input id="f_taskPhone" value="${editing? escapeAttr(editing.phone||''):''}"></div>
@@ -3263,13 +3293,13 @@ function openTaskForm(editId){
         </div>
         <div class="field-row">
           <div class="field">
-            <label>ซอย</label>
-            <input id="f_taskSoi" list="taskSoiList" value="${editing? escapeAttr(editing.soi||''):''}" placeholder="เช่น ซอย 5" autocomplete="off">
+            <label>ซอย (ตัวเลขเท่านั้น)</label>
+            <input id="f_taskSoi" list="taskSoiList" inputmode="numeric" pattern="[0-9]*" oninput="this.value=this.value.replace(/[^0-9]/g,'')" value="${editing? escapeAttr(stripToDigits(editing.soi)):''}" placeholder="เช่น 5" autocomplete="off">
             <datalist id="taskSoiList">${soiOptions.map(v=>`<option value="${escapeAttr(v)}">`).join('')}</datalist>
           </div>
           <div class="field">
-            <label>หมู่</label>
-            <input id="f_taskMoo" list="taskMooList" value="${editing? escapeAttr(editing.moo||''):''}" placeholder="เช่น หมู่ 3" autocomplete="off">
+            <label>หมู่ (ตัวเลขเท่านั้น)</label>
+            <input id="f_taskMoo" list="taskMooList" inputmode="numeric" pattern="[0-9]*" oninput="this.value=this.value.replace(/[^0-9]/g,'')" value="${editing? escapeAttr(stripToDigits(editing.moo)):''}" placeholder="เช่น 3" autocomplete="off">
             <datalist id="taskMooList">${mooOptions.map(v=>`<option value="${escapeAttr(v)}">`).join('')}</datalist>
           </div>
         </div>
@@ -3279,17 +3309,21 @@ function openTaskForm(editId){
           <datalist id="taskLandmarkList">${landmarkOptions.map(v=>`<option value="${escapeAttr(v)}">`).join('')}</datalist>
         </div>
       </div>
-      <div class="field"><label>ความเร่งรีบ</label>
-        <select id="f_taskUrgencyMode">
-          <option value="auto" ${(!editing || !editing.urgencyMode || editing.urgencyMode==='auto')?'selected':''}>🟢🟡🔴 อัตโนมัติ (ไล่สีตามเวลาที่รอ)</option>
-          <option value="green" ${editing && editing.urgencyMode==='green'?'selected':''}>🟢 เขียว (กำหนดเอง)</option>
-          <option value="yellow" ${editing && editing.urgencyMode==='yellow'?'selected':''}>🟡 เหลือง (กำหนดเอง)</option>
-          <option value="red" ${editing && editing.urgencyMode==='red'?'selected':''}>🔴 แดง (กำหนดเอง)</option>
-          <option value="paused" ${editing && editing.urgencyMode==='paused'?'selected':''}>🔵 พักไว้ก่อน (รอ activate)</option>
-        </select>
+      <div class="field">
+        <label>ความเร่งรีบ</label>
+        <button type="button" id="taskUrgencyBtn" class="btn ghost" style="width:100%;">⚙️ ${TASK_URGENCY_FORM_LABELS[initialUrgencyMode]}</button>
+        <input type="hidden" id="f_taskUrgencyMode" value="${initialUrgencyMode}">
+        <div id="taskUrgencyPopover" style="display:none;margin-top:8px;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--paper);">
+          <div class="rem-meta" style="margin-bottom:8px;">เลือกสีเองได้ตามใจ แต่ระบบยังนับเวลาที่รอต่อเนื่องอยู่เสมอ (โชว์ให้ดูใต้ชื่อ) — 🟢 ≤30 นาที · 🟡 30 นาที-2ชม.30นาที · 🔴 2ชม.30นาทีขึ้นไป คือเกณฑ์เริ่มต้นถ้าเลือก "อัตโนมัติ"</div>
+          <div class="btnrow" style="flex-direction:column;align-items:stretch;gap:6px;">
+            <button type="button" class="btn ghost" data-pick-task-urgency="auto">🟢🟡🔴 อัตโนมัติ (ไล่สีตามเวลาที่รอ)</button>
+            <button type="button" class="btn ghost" data-pick-task-urgency="green">🟢 เขียว (กำหนดเอง)</button>
+            <button type="button" class="btn ghost" data-pick-task-urgency="yellow">🟡 เหลือง (กำหนดเอง)</button>
+            <button type="button" class="btn ghost" data-pick-task-urgency="red">🔴 แดง (กำหนดเอง)</button>
+            <button type="button" class="btn ghost" data-pick-task-urgency="paused">🔵 พักไว้ก่อน (รอ activate)</button>
+          </div>
+        </div>
       </div>
-      <div class="rem-meta" style="margin-top:-8px;margin-bottom:10px;">เลือกสีเองได้ตามใจ แต่ระบบยังนับเวลาที่รอต่อเนื่องอยู่เสมอ (โชว์ให้ดูใต้ชื่อ) — 🟢 ≤30 นาที · 🟡 30 นาที-2ชม.30นาที · 🔴 2ชม.30นาทีขึ้นไป คือเกณฑ์เริ่มต้นถ้าเลือก "อัตโนมัติ"</div>
-      <div class="field"><label>ถังที่จะส่ง</label>${lineItemBuilderHtml('taskLine', editing? breakdownToLineItems(editing.gasBreakdown) : [])}</div>
       <div class="field"><label>หมายเหตุ</label><input id="f_taskNote" placeholder="เช่น โทรก่อนไปส่ง" value="${editing? escapeAttr(editing.note||''):''}"></div>
       <div id="taskFormError" class="rem-meta" style="color:var(--red);display:none;">กรุณากรอกชื่อลูกค้าก่อนบันทึก</div>
       <div class="btnrow">
@@ -3300,6 +3334,37 @@ function openTaskForm(editId){
     </form>`;
   showModal(body);
   renderLineItemsBox('taskLine');
+
+  // button-only urgency picker — emoji only appear once the popover opens. Kept form-local (no
+  // showModal/closeModal calls, which would wipe out the rest of this very form since the app
+  // only supports one modal at a time).
+  const urgencyBtn = document.getElementById('taskUrgencyBtn');
+  const urgencyHiddenInput = document.getElementById('f_taskUrgencyMode');
+  if(urgencyBtn){
+    urgencyBtn.addEventListener('click', ()=>{
+      let pop = document.getElementById('taskUrgencyPopover');
+      if(pop){ pop.remove(); return; }
+      pop = document.createElement('div');
+      pop.id = 'taskUrgencyPopover';
+      pop.style.cssText = 'margin-top:8px;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--paper);';
+      pop.innerHTML = `
+        <div class="rem-meta" style="margin-bottom:8px;">เลือกสีเองได้ตามใจ แต่ระบบยังนับเวลาที่รอต่อเนื่องอยู่เสมอ (โชว์ให้ดูใต้ชื่อ) — 🟢 ≤30 นาที · 🟡 30 นาที-2ชม.30นาที · 🔴 2ชม.30นาทีขึ้นไป คือเกณฑ์เริ่มต้นถ้าเลือก "อัตโนมัติ"</div>
+        <div class="btnrow" style="flex-direction:column;align-items:stretch;gap:6px;">
+          <button type="button" class="btn ghost" data-pick-task-urgency="auto">🟢🟡🔴 อัตโนมัติ (ไล่สีตามเวลาที่รอ)</button>
+          <button type="button" class="btn ghost" data-pick-task-urgency="green">🟢 เขียว (กำหนดเอง)</button>
+          <button type="button" class="btn ghost" data-pick-task-urgency="yellow">🟡 เหลือง (กำหนดเอง)</button>
+          <button type="button" class="btn ghost" data-pick-task-urgency="red">🔴 แดง (กำหนดเอง)</button>
+          <button type="button" class="btn ghost" data-pick-task-urgency="paused">🔵 พักไว้ก่อน (รอ activate)</button>
+        </div>`;
+      urgencyBtn.insertAdjacentElement('afterend', pop);
+      pop.querySelectorAll('[data-pick-task-urgency]').forEach(b=>b.addEventListener('click', ()=>{
+        const val = b.dataset.pickTaskUrgency;
+        urgencyHiddenInput.value = val;
+        urgencyBtn.textContent = `⚙️ ${TASK_URGENCY_FORM_LABELS[val]}`;
+        pop.remove();
+      }));
+    });
+  }
 
   const nameInput = document.getElementById('f_taskCustName');
   const suggestBox = document.getElementById('taskCustSuggestions');
@@ -3353,8 +3418,8 @@ function openTaskForm(editId){
       customName: customerId? null : typedName,
       phone: customerId? '' : document.getElementById('f_taskPhone').value.trim(),
       address: customerId? '' : document.getElementById('f_taskAddress').value.trim(),
-      soi: customerId? '' : document.getElementById('f_taskSoi').value.trim(),
-      moo: customerId? '' : document.getElementById('f_taskMoo').value.trim(),
+      soi: customerId? '' : stripToDigits(document.getElementById('f_taskSoi').value),
+      moo: customerId? '' : stripToDigits(document.getElementById('f_taskMoo').value),
       landmark: customerId? '' : document.getElementById('f_taskLandmark').value.trim(),
       urgencyMode: document.getElementById('f_taskUrgencyMode').value,
       gasBreakdown: (window._lineBuilders['taskLine']||[]).slice(),
