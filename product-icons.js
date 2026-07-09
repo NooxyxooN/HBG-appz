@@ -65,8 +65,8 @@ function productIconSrc(productId){
   return key ? (PRODUCT_ICONS[key] || '') : '';
 }
 // small <img> helper, returns '' (renders nothing) if src is missing so callers can safely inline it
-function iconImgHtml(src, size){
+function iconImgHtml(src, size, extraStyle){
   size = size || 32;
   if(!src) return '';
-  return '<img src="' + src + '" style="width:' + size + 'px;height:' + size + 'px;image-rendering:pixelated;border-radius:6px;vertical-align:middle;flex-shrink:0;">';
+  return '<img src="' + src + '" style="width:' + size + 'px;height:' + size + 'px;image-rendering:pixelated;border-radius:6px;vertical-align:middle;flex-shrink:0;' + (extraStyle||'') + '">';
 }

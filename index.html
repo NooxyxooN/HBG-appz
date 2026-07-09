@@ -409,7 +409,7 @@ const DEFAULT_OTHER_PRODUCTS = [
   { id:'op_stove_double', name:'เตาคู่', price:0, cost:0, unit:'ชิ้น' },
   { id:'op_igniter', name:'ปืนยิงแก๊ส', price:0, cost:0, unit:'ชิ้น' }
 ];
-let state = { customers: [], sales: [], reminders: [], tasks: [], purchases: [], transactions: [], gasPrices: {4:0,7:0,15:0,48:0}, pickupDiscount: {4:10,7:10,15:20,48:20}, inventory: emptyInventory(), dailySummaries: {}, otherProducts: [], loaded:false };
+let state = { customers: [], sales: [], reminders: [], tasks: [], purchases: [], transactions: [], gasPrices: {4:0,7:0,15:0,48:0}, pickupDiscount: {4:10,7:10,15:20,48:20}, inventory: emptyInventory(), dailySummaries: {}, otherProducts: [], truckStock: [], loaded:false };
 let currentTab = 'dashboard';
 let salesPeriod = 'day';
 let salesViewDate = todayISO();
@@ -557,8 +557,10 @@ async function init(){
   state.inventory = await loadData('inventory', emptyInventory());
   state.dailySummaries = await loadData('dailySummaries', {});
   state.otherProducts = await loadData('otherProducts', DEFAULT_OTHER_PRODUCTS);
+  state.truckStock = await loadData('truckStock', []);
   migrateNumericSoiMoo();
   migrateAddNewDefaultProducts();
+  migrateTruckStockShape();
   state.loaded = true;
   document.getElementById('todayLabel').textContent = new Date().toLocaleDateString('th-TH',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
   render();
@@ -587,6 +589,7 @@ async function init(){
     window.fbListen('inventory', items=>{ if(items){ state.inventory = items; render(); } });
     window.fbListen('dailySummaries', items=>{ if(items){ state.dailySummaries = items; render(); } });
     window.fbListen('otherProducts', items=>{ if(items){ state.otherProducts = items; render(); } });
+    window.fbListen('truckStock', items=>{ if(items){ state.truckStock = items; render(); } });
   }catch(e){ console.error('realtime listener setup failed', e); }
 }
 
@@ -655,6 +658,20 @@ function migrateAddNewDefaultProducts(){
   }
 }
 
+// one-time cleanup: ถังบนรถ entries used to be a flat {size,brand,qty} count before full/empty tracking
+// was added — convert any old-shape rows (their whole qty was assumed "full") to {size,brand,full,empty}
+function migrateTruckStockShape(){
+  let changed = false;
+  state.truckStock = (state.truckStock||[]).map(i=>{
+    if(i.full===undefined){
+      changed = true;
+      return { size:i.size, brand:i.brand, full:Number(i.qty||0), empty:0 };
+    }
+    return i;
+  });
+  if(changed) persistTruckStock();
+}
+
 /* ---------------- persistence helpers ---------------- */
 function persistCustomers(){ saveData('customers', state.customers); }
 function persistSales(){ saveData('sales', state.sales); }
@@ -667,6 +684,7 @@ function persistPickupDiscount(){ saveData('pickupDiscount', state.pickupDiscoun
 function persistInventory(){ saveData('inventory', state.inventory); }
 function persistDailySummaries(){ saveData('dailySummaries', state.dailySummaries); }
 function persistOtherProducts(){ saveData('otherProducts', state.otherProducts); }
+function persistTruckStock(){ saveData('truckStock', state.truckStock); }
 
 function computeDailySummary(dateStr){
   const salesToday = state.sales.filter(s=>s.date===dateStr);
@@ -1418,6 +1436,16 @@ function renderDashboard(){
     const unspecified = Number(c.gasCylinders||0) - bdSum;
     if(unspecified>0) gasByBrand.regular += unspecified;
   });
+  // total tanks physically at the shop right now (full + empty combined, split by brand) — used by
+  // the merged ราคาแก๊สวันนี้ card's "ถังที่ร้าน" summary box
+  const shopStockByBrand = { regular: 0, ptt: 0 };
+  GAS_SIZES.forEach(sz=>{
+    const reg = (state.inventory[sz] && state.inventory[sz].regular) || {full:0,empty:0};
+    const ptt = (state.inventory[sz] && state.inventory[sz].ptt) || {full:0,empty:0};
+    shopStockByBrand.regular += Number(reg.full||0) + Number(reg.empty||0);
+    shopStockByBrand.ptt += Number(ptt.full||0) + Number(ptt.empty||0);
+  });
+  const totalShopStock = shopStockByBrand.regular + shopStockByBrand.ptt;
   const upcoming = getUpcomingReminders(3);
   // customers whose predicted delivery cycle says they're due (or overdue) within 2 days — stays
   // empty until enough order history builds up per customer (needs 3+ real deliveries to guess)
@@ -1457,27 +1485,56 @@ function renderDashboard(){
     </div>`;
 
   const avgCost = getWeightedAvgCostPerUnit();
+  // merged card: ราคาแก๊สวันนี้ + สต๊อกถังที่ร้าน live together now, so a size's price/profit and its
+  // remaining stock are visible at the same glance instead of needing two separate cards
   const priceCard = `
     <div class="stamp-card">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:6px;">
         <div style="font-weight:700;">🛢️ ราคาแก๊สวันนี้</div>
-        <button class="btn ghost small" id="editPricesBtn">แก้ไขราคาแก๊ส</button>
+        <div class="btnrow" style="margin:0;">
+          <button class="btn ghost small" id="editInventoryBtn">ปรับสต๊อก</button>
+          <button class="btn ghost small" id="editPricesBtn">แก้ไขราคาแก๊ส</button>
+        </div>
       </div>
       <div class="grid2" style="margin-bottom:0;">
         ${GAS_SIZES.map(sz=>{
           const sell = Number(state.gasPrices[sz]||0);
           const cost = avgCost[sz];
           const profit = cost!==null ? sell - cost : null;
+          const reg = (state.inventory[sz] && state.inventory[sz].regular) || {full:0,empty:0};
+          const ptt = (state.inventory[sz] && state.inventory[sz].ptt) || {full:0,empty:0};
           return `<div class="stat">
             <div class="label" style="display:flex;align-items:center;gap:6px;">${iconImgHtml(tankIconSrc('regular', sz), 26)}${sz} kg</div>
             <div class="value mono" style="font-size:17px;">฿${fmtMoney(sell)}</div>
             ${profit!==null
-              ? `<div class="rem-meta" style="margin-top:2px;color:${profit>=0?'var(--green)':'var(--red)'};">กำไร ${profit>=0?'+':''}฿${fmtMoney(Math.round(profit))} (ทุนเฉลี่ย ฿${fmtMoney(Math.round(cost))})</div>`
+              ? `<div class="rem-meta" style="margin-top:2px;color:${profit>=0?'var(--green)':'var(--red)'};">กำไร ${profit>=0?'+':''}฿${fmtMoney(Math.round(profit))} (ทุน ฿${fmtMoney(Math.round(cost))})</div>`
               : `<div class="rem-meta" style="margin-top:2px;">ยังไม่มีข้อมูลต้นทุน</div>`}
+            <div style="display:flex;gap:4px;margin-top:6px;border-top:1px dashed var(--border);padding-top:6px;font-size:11.5px;">
+              <div style="flex:1;text-align:center;">
+                <div style="color:var(--ink-soft);">ธรรมดา</div>
+                <span class="mono" style="font-weight:700;cursor:pointer;" data-edit-inv="${sz}_regular_full" title="แตะเพื่อแก้ไข">${reg.full}</span><span style="color:var(--ink-soft);cursor:pointer;" data-edit-inv="${sz}_regular_empty" title="แตะเพื่อแก้ไข">/${reg.empty} เปล่า</span>
+              </div>
+              <div style="flex:1;text-align:center;border-left:1px dashed var(--border);">
+                <div style="color:var(--ink-soft);">🅿 ปตท</div>
+                <span class="mono" style="font-weight:700;cursor:pointer;" data-edit-inv="${sz}_ptt_full" title="แตะเพื่อแก้ไข">${ptt.full}</span><span style="color:var(--ink-soft);cursor:pointer;" data-edit-inv="${sz}_ptt_empty" title="แตะเพื่อแก้ไข">/${ptt.empty} เปล่า</span>
+              </div>
+            </div>
           </div>`;
         }).join('')}
       </div>
-      <div class="rem-meta" style="margin-top:8px;">ทุนเฉลี่ยนี้รวมค่าทิปเด็กส่งเข้าไปด้วยแล้ว ถ่วงน้ำหนักตามจำนวนถังจากทุกรายการที่เคยกรอกต้นทุนไว้ในแท็บ "รับถัง"</div>
+      <div class="rem-meta" style="margin-top:8px;">ทุนเฉลี่ยนี้รวมค่าทิปเด็กส่งเข้าไปด้วยแล้ว ถ่วงน้ำหนักตามจำนวนถังจากทุกรายการที่เคยกรอกต้นทุนไว้ในแท็บ "รับถัง" · แตะตัวเลขสต๊อกเพื่อแก้ไขตรงนั้นได้เลย</div>
+      <div class="grid2" style="margin-top:10px;margin-bottom:0;">
+        <div class="stat" style="background:var(--orange);border:none;">
+          <div class="label" style="color:#FFE8D6;">ถังยืม</div>
+          <div class="value mono" style="font-size:22px;color:#fff;">${fmtMoney(totalGas)}</div>
+          <div style="font-size:11.5px;color:#FFE8D6;margin-top:2px;">ธรรมดา ${fmtMoney(gasByBrand.regular)} · 🅿 ปตท ${fmtMoney(gasByBrand.ptt)}</div>
+        </div>
+        <div class="stat" style="background:var(--green);border:none;">
+          <div class="label" style="color:#DFF3E8;">ถังที่ร้าน</div>
+          <div class="value mono" style="font-size:22px;color:#fff;">${fmtMoney(totalShopStock)}</div>
+          <div style="font-size:11.5px;color:#DFF3E8;margin-top:2px;">ธรรมดา ${fmtMoney(shopStockByBrand.regular)} · 🅿 ปตท ${fmtMoney(shopStockByBrand.ptt)}</div>
+        </div>
+      </div>
     </div>`;
 
   const otherProductsCard = `
@@ -1502,41 +1559,6 @@ function renderDashboard(){
       </div>
       <div class="rem-meta" style="margin-top:8px;">แตะการ์ดสินค้าเพื่อแก้ไขราคา/ต้นทุน/รูป หรือลบสินค้านั้น</div>
       `)}
-    </div>`;
-
-  const inventoryCard = `
-    <div class="stamp-card">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-        <div style="font-weight:700;">📦 สต๊อกถังที่ร้าน</div>
-        <button class="btn ghost small" id="editInventoryBtn">ปรับสต๊อก</button>
-      </div>
-      <div class="rem-meta" style="margin-bottom:6px;">แตะตัวเลขเพื่อแก้ไขตรงนั้นได้เลย</div>
-      <div style="display:flex;padding:0 4px 4px;">
-        <div style="width:42px;"></div>
-        <div style="flex:1;text-align:center;font-size:11.5px;font-weight:700;color:var(--ink-soft);">ธรรมดา</div>
-        <div style="flex:1;text-align:center;font-size:11.5px;font-weight:700;color:var(--ink-soft);">🅿 ปตท</div>
-      </div>
-      ${GAS_SIZES.map(sz=>{
-        const reg = (state.inventory[sz] && state.inventory[sz].regular) || {full:0,empty:0};
-        const ptt = (state.inventory[sz] && state.inventory[sz].ptt) || {full:0,empty:0};
-        return `
-        <div style="display:flex;align-items:center;padding:7px 4px;border-bottom:1px dashed var(--border);">
-          <div style="width:42px;font-weight:700;font-size:13.5px;">${sz} kg</div>
-          <div style="flex:1;text-align:center;">
-            <span class="mono" style="font-size:21px;font-weight:700;cursor:pointer;padding:2px 5px;border-radius:6px;" data-edit-inv="${sz}_regular_full" title="แตะเพื่อแก้ไข">${reg.full}</span>
-            <span style="font-size:11.5px;color:var(--ink-soft);cursor:pointer;" data-edit-inv="${sz}_regular_empty" title="แตะเพื่อแก้ไข"> / ${reg.empty} เปล่า</span>
-          </div>
-          <div style="flex:1;text-align:center;border-left:1px dashed var(--border);">
-            <span class="mono" style="font-size:21px;font-weight:700;cursor:pointer;padding:2px 5px;border-radius:6px;" data-edit-inv="${sz}_ptt_full" title="แตะเพื่อแก้ไข">${ptt.full}</span>
-            <span style="font-size:11.5px;color:var(--ink-soft);cursor:pointer;" data-edit-inv="${sz}_ptt_empty" title="แตะเพื่อแก้ไข"> / ${ptt.empty} เปล่า</span>
-          </div>
-        </div>`;
-      }).join('')}
-      <div class="stat" style="background:var(--orange);border:none;margin-top:10px;">
-        <div class="label" style="color:#FFE8D6;">ถังยืม (อยู่กับลูกค้าทั้งหมด)</div>
-        <div class="value mono" style="font-size:22px;color:#fff;">${fmtMoney(totalGas)}</div>
-        <div style="font-size:12px;color:#FFE8D6;margin-top:2px;">ธรรมดา ${fmtMoney(gasByBrand.regular)} · 🅿 ปตท ${fmtMoney(gasByBrand.ptt)}</div>
-      </div>
     </div>`;
 
   const purchaseCard = unpaidBills.length ? `
@@ -1576,7 +1598,6 @@ function renderDashboard(){
     ${plCard}
     ${priceCard}
     ${otherProductsCard}
-    ${inventoryCard}
     ${purchaseCard}
     ${upcomingReorders.length? `
     <h2 class="section-title">🔁 ใกล้ถึงรอบส่งแล้ว (คาดการณ์จากประวัติสั่งซื้อ)</h2>
@@ -1618,7 +1639,8 @@ function exportFullBackup(){
     pickupDiscount: state.pickupDiscount,
     inventory: state.inventory,
     dailySummaries: state.dailySummaries,
-    otherProducts: state.otherProducts
+    otherProducts: state.otherProducts,
+    truckStock: state.truckStock
   };
   const json = JSON.stringify(backup, null, 2);
   const blob = new Blob([json], {type:'application/json'});
@@ -2947,6 +2969,7 @@ function openSaleForm(presetCustomerId, editId){
     else {
       state.sales.push({ id:uid(), ...data, createdAt: Date.now() });
       applyDeliveryToInventory(data.gasBreakdown, data.cylinderPending);
+      applyDeliveryToTruckStock(data.gasBreakdown, data.cylinderPending);
       if(customerId){
         adjustCustomerRemote(customerId, fresh=>{
           const updated = cloneCustomerForEdit(fresh);
@@ -3571,6 +3594,173 @@ function showTasksBreakdownModal(){
   showModal(body);
 }
 
+/* ---------------- ถังบนรถ (truck stock) — a manual per-size/brand counter for how many tanks got
+   physically loaded onto the delivery vehicle today, so the driver can check at a glance whether
+   there's enough on board to cover the day's remaining route without recounting the truck bed.
+   Persisted like every other collection (state.truckStock), so it stays in sync across devices. ---------------- */
+function computeTodayTasksGasBreakdown(){
+  const totals = {};
+  state.tasks.forEach(t=>{
+    breakdownToLineItems(t.gasBreakdown||{}).forEach(item=>{
+      if(!item.qty) return;
+      const key = item.size+'_'+item.brand;
+      if(!totals[key]) totals[key] = { size:item.size, brand:item.brand, qty:0 };
+      totals[key].qty += item.qty;
+    });
+  });
+  return Object.values(totals).filter(i=>i.qty>0);
+}
+function truckStockFullTotal(){ return (state.truckStock||[]).reduce((a,i)=>a+Number(i.full||0),0); }
+function truckStockEmptyTotal(){ return (state.truckStock||[]).reduce((a,i)=>a+Number(i.empty||0),0); }
+function truckStockTotal(){ return truckStockFullTotal() + truckStockEmptyTotal(); }
+// full tanks render normally; empty ones render faded/grayscale so anyone glancing at the bar (not
+// just the driver) can tell full vs. empty apart at a glance without opening the modal
+function truckStockIconsHtml(size){
+  const items = state.truckStock||[];
+  const icons = [];
+  items.forEach(i=>{
+    for(let k=0;k<Number(i.full||0);k++) icons.push(iconImgHtml(tankIconSrc(i.brand, i.size), size||24));
+    for(let k=0;k<Number(i.empty||0);k++) icons.push(iconImgHtml(tankIconSrc(i.brand, i.size), size||24, 'filter:grayscale(1) brightness(0.85);opacity:0.7;'));
+  });
+  return icons.join('');
+}
+function refreshTruckStockModal(){
+  const bar = document.getElementById('truckStockSummaryBar');
+  if(bar){
+    bar.innerHTML = `<div class="debtor-total" style="margin-bottom:10px;">
+      <span>รวม ${fmtMoney(truckStockTotal())} ถัง</span>
+      <span class="amt" style="font-size:15px;">เต็ม ${fmtMoney(truckStockFullTotal())} · เปล่า ${fmtMoney(truckStockEmptyTotal())}</span>
+    </div>`;
+  }
+  renderTruckStockRows();
+}
+function renderTruckStockRows(){
+  const box = document.getElementById('truckStockRows');
+  if(!box) return;
+  const items = (state.truckStock||[]).filter(i=>Number(i.full||0)>0 || Number(i.empty||0)>0);
+  if(!items.length){ box.innerHTML = '<div class="rem-meta">ยังไม่มีถังบนรถตอนนี้</div>'; return; }
+  box.innerHTML = items.map(i=>`
+    <div class="card" style="padding:8px 12px;margin-bottom:4px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+        ${iconImgHtml(tankIconSrc(i.brand, i.size), 28)}
+        <div style="font-weight:600;">${i.size} kg (${GAS_BRAND_LABELS[i.brand]})</div>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <div style="flex:1;display:flex;justify-content:space-between;align-items:center;background:var(--paper);border-radius:6px;padding:4px 8px;">
+          <span>เต็ม ${i.full||0}</span>
+          <button type="button" class="btn ghost small" data-truck-dec="${i.size}_${i.brand}_full" ${!(i.full>0)?'disabled':''}>－</button>
+        </div>
+        <div style="flex:1;display:flex;justify-content:space-between;align-items:center;background:var(--paper);border-radius:6px;padding:4px 8px;">
+          <span style="color:var(--ink-soft);">เปล่า ${i.empty||0}</span>
+          <button type="button" class="btn ghost small" data-truck-dec="${i.size}_${i.brand}_empty" ${!(i.empty>0)?'disabled':''}>－</button>
+        </div>
+      </div>
+    </div>`).join('');
+}
+// เพิ่ม / เพิ่มตามลูกค้า always add FULL tanks (that's what gets loaded onto the truck before heading
+// out) — the empty count only grows automatically via applyDeliveryToTruckStock when a delivery completes
+function addToTruckStock(items){
+  state.truckStock = state.truckStock || [];
+  items.forEach(item=>{
+    if(!item.qty) return;
+    const existing = state.truckStock.find(l=>l.size===item.size && l.brand===item.brand);
+    if(existing) existing.full = Number(existing.full||0) + item.qty;
+    else state.truckStock.push({ size:item.size, brand:item.brand, full:item.qty, empty:0 });
+  });
+  persistTruckStock();
+}
+// mirrors applyDeliveryToInventory but for the truck's own on-board stock: a delivered full tank
+// leaves the truck's "full" count, and (unless the customer's empty is still pending pickup) comes
+// right back onto the truck as an "empty" — this is what fades that tank's icon to gray in the bar
+function applyDeliveryToTruckStock(breakdown, cylinderPending){
+  if(!breakdown) return;
+  state.truckStock = state.truckStock || [];
+  breakdownToLineItems(breakdown).forEach(item=>{
+    if(!item.qty) return;
+    let entry = state.truckStock.find(l=>l.size===item.size && l.brand===item.brand);
+    if(!entry){ entry = { size:item.size, brand:item.brand, full:0, empty:0 }; state.truckStock.push(entry); }
+    entry.full = Math.max(0, Number(entry.full||0) - item.qty);
+    if(!cylinderPending) entry.empty = Number(entry.empty||0) + item.qty;
+  });
+  persistTruckStock();
+}
+function openTruckStockModal(){
+  const custBreakdown = computeTodayTasksGasBreakdown();
+  const custTotal = custBreakdown.reduce((a,i)=>a+i.qty,0);
+  const body = `
+    <h3>🚚 ถังบนรถ</h3>
+    <div class="rem-meta" style="margin-bottom:10px;line-height:1.6;">ใช้ติดตามว่าวันนี้โหลดถังขึ้นรถไปกี่ใบ แยกขนาด/ยี่ห้อ/เต็ม-เปล่า แก้ตรงนี้เครื่องไหนก็เห็นตรงกันหมด (กดส่งเสร็จแล้วถังนั้นจะเปลี่ยนเป็นเปล่าให้อัตโนมัติ)</div>
+    <div id="truckStockSummaryBar"></div>
+    <div id="truckStockRows" style="margin-bottom:10px;"></div>
+    <div class="field-row" style="align-items:flex-end;">
+      <div class="field" style="flex:1;">
+        <label style="font-size:11px;">ขนาด</label>
+        <select id="truckAddSize">${GAS_SIZES.map(sz=>`<option value="${sz}" ${sz==='15'?'selected':''}>${sz} kg</option>`).join('')}</select>
+      </div>
+      <div class="field" style="flex:1;">
+        <label style="font-size:11px;">จำนวน</label>
+        <input type="number" min="1" id="truckAddQty" placeholder="1" value="1">
+      </div>
+      <div class="field" style="flex:1;">
+        <label style="font-size:11px;">ยี่ห้อ</label>
+        <select id="truckAddBrand">
+          <option value="regular">ธรรมดา</option>
+          <option value="ptt">🅿 ปตท</option>
+        </select>
+      </div>
+      <button type="button" class="btn primary" id="truckAddBtn" style="margin-bottom:11px;">➕</button>
+    </div>
+    <div class="btnrow" style="margin-top:12px;">
+      <button type="button" class="btn ghost small" id="truckAddFromCustomersBtn">📋 เพิ่มตามยอดลูกค้าวันนี้ (${fmtMoney(custTotal)} ถัง)</button>
+      <button type="button" class="btn danger small" id="truckClearBtn">🗑 ล้างทั้งหมด</button>
+    </div>
+    <div class="btnrow" style="margin-top:14px;">
+      <button type="button" class="btn ghost" id="cancelModal">ปิด</button>
+    </div>
+  `;
+  showModal(body);
+  refreshTruckStockModal();
+  document.getElementById('truckAddBtn').addEventListener('click', ()=>{
+    const size = document.getElementById('truckAddSize').value;
+    const qty = Number(document.getElementById('truckAddQty').value)||0;
+    const brand = document.getElementById('truckAddBrand').value;
+    if(qty>0){
+      addToTruckStock([{size, brand, qty}]);
+      document.getElementById('truckAddQty').value = 1;
+      refreshTruckStockModal();
+      render();
+    }
+  });
+  document.getElementById('truckAddFromCustomersBtn').addEventListener('click', ()=>{
+    if(!custBreakdown.length) return;
+    addToTruckStock(custBreakdown);
+    refreshTruckStockModal();
+    render();
+  });
+  document.getElementById('truckClearBtn').addEventListener('click', ()=>{
+    if(!state.truckStock.length) return;
+    if(confirm('ล้างถังบนรถทั้งหมดใช่หรือไม่?')){
+      state.truckStock = [];
+      persistTruckStock();
+      refreshTruckStockModal();
+      render();
+    }
+  });
+  document.getElementById('truckStockRows').addEventListener('click', e=>{
+    const decBtn = e.target.closest('[data-truck-dec]');
+    if(!decBtn) return;
+    const [size, brand, kind] = decBtn.dataset.truckDec.split('_');
+    const entry = state.truckStock.find(l=>l.size===size && l.brand===brand);
+    if(entry && Number(entry[kind]||0)>0){
+      entry[kind] -= 1;
+      if((Number(entry.full||0)<=0) && (Number(entry.empty||0)<=0)) state.truckStock = state.truckStock.filter(l=>!(l.size===size && l.brand===brand));
+      persistTruckStock();
+      refreshTruckStockModal();
+      render();
+    }
+  });
+}
+
 function openExportReceiptModal(type){
   const body = `
     <h3>📤 Export เป็นรูปสำหรับพิมพ์</h3>
@@ -3724,6 +3914,18 @@ function renderTasks(){
       <span class="amt">${fmtMoney(totalQty)} ถัง</span>
     </div>` : '';
 
+  // "ถังบนรถ" — manual tally of tanks physically loaded onto the delivery vehicle today; tap to
+  // add/remove/clear (see openTruckStockModal). Shown even with 0 so the driver always has quick access.
+  const truckBar = `
+    <div class="debtor-total" data-open-truck-stock="1" style="cursor:pointer;flex-wrap:wrap;gap:8px;align-items:center;">
+      <span>🚚 ถังบนรถ</span>
+      <span style="display:flex;flex-wrap:wrap;gap:2px;flex:1;min-width:80px;">${truckStockIconsHtml(26) || '<span class="rem-meta" style="color:#B9BCB2;">ยังไม่มี</span>'}</span>
+      <div style="text-align:right;">
+        <div class="amt" style="line-height:1.2;">${fmtMoney(truckStockTotal())} ถัง</div>
+        <div style="font-size:11px;color:#B9BCB2;">เต็ม ${fmtMoney(truckStockFullTotal())} · เปล่า ${fmtMoney(truckStockEmptyTotal())}</div>
+      </div>
+    </div>`;
+
   const filterLabels = {all:'ทั้งหมด', red:'🔴 ค้างนาน', yellow:'🟡 รอนาน', green:'🟢 ปกติ', paused:'🔵 พักไว้'};
   const sortLabels = {urgency:'ความเร่งรีบ', name:'ชื่อ', recent:'เพิ่มล่าสุด'};
   const activeSummary = [];
@@ -3777,8 +3979,8 @@ function renderTasks(){
   else if(tasksSort==='recent') list.sort((a,b)=> (b.addedAt||b.timerStartAt||0) - (a.addedAt||a.timerStartAt||0));
   else list.sort((a,b)=> stateWeight[getTaskUrgencyState(a)] - stateWeight[getTaskUrgencyState(b)]);
 
-  if(!state.tasks.length) return intro + notifyBanner + '<div class="empty">ยังไม่มีงานส่งของวันนี้<br>แตะปุ่ม + เพื่อเพิ่มรายชื่อที่ต้องไปส่ง</div>';
-  if(!list.length) return intro + notifyBanner + summaryBar + searchBar + toggleBtn + panel + '<div class="empty">ไม่พบงานที่ตรงกับเงื่อนไข</div>';
+  if(!state.tasks.length) return intro + notifyBanner + truckBar + '<div class="empty">ยังไม่มีงานส่งของวันนี้<br>แตะปุ่ม + เพื่อเพิ่มรายชื่อที่ต้องไปส่ง</div>';
+  if(!list.length) return intro + notifyBanner + summaryBar + truckBar + searchBar + toggleBtn + panel + '<div class="empty">ไม่พบงานที่ตรงกับเงื่อนไข</div>';
 
   const rows = list.map(t=>{
     const cust = t.customerId? state.customers.find(c=>c.id===t.customerId) : null;
@@ -3812,7 +4014,7 @@ function renderTasks(){
       </div>
     </div>`;
   }).join('');
-  return intro + notifyBanner + summaryBar + searchBar + toggleBtn + panel + rows;
+  return intro + notifyBanner + summaryBar + truckBar + searchBar + toggleBtn + panel + rows;
 }
 
 // when a task is linked to an existing customer, their phone/address/soi/moo/landmark live on the
@@ -4094,7 +4296,7 @@ function openTaskCompleteForm(taskId){
       });
       persistSales();
     }
-    if(gasQty>0) applyDeliveryToInventory(breakdown, cylinderPending);
+    if(gasQty>0){ applyDeliveryToInventory(breakdown, cylinderPending); applyDeliveryToTruckStock(breakdown, cylinderPending); }
     if(t.customerId && !saveAsCustomer){
       adjustCustomerRemote(t.customerId, fresh=>{
         const updated = cloneCustomerForEdit(fresh);
@@ -4508,6 +4710,7 @@ function attachHandlers(){
   const exportTasksBtn = document.getElementById('exportTasksBtn');
   if(exportTasksBtn) exportTasksBtn.addEventListener('click', ()=>openExportReceiptModal('tasks'));
   document.querySelectorAll('[data-show-tasks-breakdown]').forEach(b=>b.addEventListener('click', showTasksBreakdownModal));
+  document.querySelectorAll('[data-open-truck-stock]').forEach(b=>b.addEventListener('click', openTruckStockModal));
   document.querySelectorAll('[data-set-urgency]').forEach(b=>b.addEventListener('click', ()=>openTaskUrgencyPicker(b.dataset.setUrgency)));
   const enableTaskNotifyBtn = document.getElementById('enableTaskNotifyBtn');
   if(enableTaskNotifyBtn) enableTaskNotifyBtn.addEventListener('click', requestTaskNotificationPermission);
