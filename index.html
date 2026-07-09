@@ -403,13 +403,18 @@ const DEFAULT_OTHER_PRODUCTS = [
   { id:'op_tank15_regular', name:'ถังใหม่ 15kg (ธรรมดา)', price:2800, cost:0, unit:'ถัง' },
   { id:'op_tank15_ptt', name:'ถังใหม่ 15kg (🅿 ปตท)', price:3300, cost:0, unit:'ถัง' },
   { id:'op_tank4_regular', name:'ถังใหม่ 4kg + โครง พร้อมใช้ (ธรรมดา)', price:1550, cost:0, unit:'ชุด' },
-  { id:'op_tank4_ptt', name:'ถังใหม่ 4kg + โครง พร้อมใช้ (🅿 ปตท)', price:1750, cost:0, unit:'ชุด' }
+  { id:'op_tank4_ptt', name:'ถังใหม่ 4kg + โครง พร้อมใช้ (🅿 ปตท)', price:1750, cost:0, unit:'ชุด' },
+  { id:'op_stove_torch', name:'เตาหัวฟู่', price:0, cost:0, unit:'ชิ้น' },
+  { id:'op_stove_single', name:'เตาเดี่ยว', price:0, cost:0, unit:'ชิ้น' },
+  { id:'op_stove_double', name:'เตาคู่', price:0, cost:0, unit:'ชิ้น' },
+  { id:'op_igniter', name:'ปืนยิงแก๊ส', price:0, cost:0, unit:'ชิ้น' }
 ];
 let state = { customers: [], sales: [], reminders: [], tasks: [], purchases: [], transactions: [], gasPrices: {4:0,7:0,15:0,48:0}, pickupDiscount: {4:10,7:10,15:20,48:20}, inventory: emptyInventory(), dailySummaries: {}, otherProducts: [], loaded:false };
 let currentTab = 'dashboard';
 let salesPeriod = 'day';
 let salesViewDate = todayISO();
 let selectedOtherProductId = null;
+let otherProductsCardExpanded = false;
 
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
 function todayISO(){ return new Date().toISOString().slice(0,10); }
@@ -553,6 +558,7 @@ async function init(){
   state.dailySummaries = await loadData('dailySummaries', {});
   state.otherProducts = await loadData('otherProducts', DEFAULT_OTHER_PRODUCTS);
   migrateNumericSoiMoo();
+  migrateAddNewDefaultProducts();
   state.loaded = true;
   document.getElementById('todayLabel').textContent = new Date().toLocaleDateString('th-TH',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
   render();
@@ -635,6 +641,18 @@ function migrateNumericSoiMoo(){
     if(newMoo !== (t.moo||'')){ t.moo = newMoo; taskChanged = true; }
   });
   if(taskChanged) persistTasks();
+}
+
+// one-time cleanup: appends any DEFAULT_OTHER_PRODUCTS entries that don't exist yet in the customer's
+// saved otherProducts catalog (matched by id) — so shops that already had this feature running get new
+// catalog items (like the stoves added later) without their existing prices/edits being touched
+function migrateAddNewDefaultProducts(){
+  const existingIds = new Set(state.otherProducts.map(p=>p.id));
+  const missing = DEFAULT_OTHER_PRODUCTS.filter(p=>!existingIds.has(p.id));
+  if(missing.length){
+    state.otherProducts = state.otherProducts.concat(missing.map(p=>({...p})));
+    persistOtherProducts();
+  }
 }
 
 /* ---------------- persistence helpers ---------------- */
@@ -846,7 +864,7 @@ function gasBrandIconsHtml(b, size){
   const items = Array.isArray(b) ? b : GAS_SIZES.map(sz=>({ size:sz, brand:getBreakdownBrand(b[sz]), qty:getBreakdownQty(b[sz]) }));
   const brandsPresent = [...new Set(items.filter(i=>Number(i.qty||0)>0).map(i=>i.brand||'regular'))];
   if(!brandsPresent.length) return '';
-  return brandsPresent.map(br=>iconImgHtml(tankIconSrc(br,'15'), size)).join('');
+  return brandsPresent.map(br=>iconImgHtml(tankIconSrc(br), size)).join('');
 }
 // summarizes an otherItems array (non-gas products picked via the "สินค้าอื่นๆ" line builder) for
 // display on task/sale cards, e.g. "สายแก๊ส ×2 (฿300), แหวนรัดสาย ×1 (฿10)"
@@ -1439,15 +1457,10 @@ function renderDashboard(){
     </div>`;
 
   const avgCost = getWeightedAvgCostPerUnit();
-  // "สินค้าอื่นๆ" section — dropdown picks one product at a time out of state.otherProducts so the
-  // card doesn't get long; falls back to the first product if nothing (or a since-deleted id) is selected
-  const pickedOtherProduct = state.otherProducts.find(p=>p.id===selectedOtherProductId) || state.otherProducts[0] || null;
-  const otherProductProfit = pickedOtherProduct && Number(pickedOtherProduct.cost||0)>0
-    ? Number(pickedOtherProduct.price||0) - Number(pickedOtherProduct.cost||0) : null;
   const priceCard = `
     <div class="stamp-card">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-        <div style="font-weight:700;">🛢️ ราคาสินค้าทั้งหมด</div>
+        <div style="font-weight:700;">🛢️ ราคาแก๊สวันนี้</div>
         <button class="btn ghost small" id="editPricesBtn">แก้ไขราคาแก๊ส</button>
       </div>
       <div class="grid2" style="margin-bottom:0;">
@@ -1465,29 +1478,30 @@ function renderDashboard(){
         }).join('')}
       </div>
       <div class="rem-meta" style="margin-top:8px;">ทุนเฉลี่ยนี้รวมค่าทิปเด็กส่งเข้าไปด้วยแล้ว ถ่วงน้ำหนักตามจำนวนถังจากทุกรายการที่เคยกรอกต้นทุนไว้ในแท็บ "รับถัง"</div>
-      <div style="border-top:1px dashed var(--border);margin:12px 0;"></div>
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-        <div style="font-weight:700;">🧰 สินค้าอื่นๆ</div>
+    </div>`;
+
+  const otherProductsCard = `
+    <div class="stamp-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;${otherProductsCardExpanded?'margin-bottom:8px;':''}">
+        <button type="button" class="btn ghost small" id="toggleOtherProductsBtn" style="font-weight:700;color:var(--ink);background:none;border:none;padding:0;font-size:14px;">${otherProductsCardExpanded?'▾':'▸'} 🧰 สินค้าอื่นๆ</button>
         <button class="btn ghost small" id="addOtherProductBtn">➕ เพิ่มสินค้า</button>
       </div>
-      ${!state.otherProducts.length ? `<div class="rem-meta">ยังไม่มีสินค้าอื่นในระบบ กด "เพิ่มสินค้า" เพื่อเริ่มบันทึก</div>` : `
-      <select id="otherProductSelect" style="margin-bottom:8px;">
-        ${state.otherProducts.map(p=>`<option value="${escapeAttr(p.id)}" ${pickedOtherProduct && pickedOtherProduct.id===p.id?'selected':''}>${escapeHtml(p.name)}</option>`).join('')}
-      </select>
-      ${pickedOtherProduct? `
-      ${iconImgHtml(productIconSrc(pickedOtherProduct.id), 56) ? `<div style="text-align:center;margin-bottom:8px;">${iconImgHtml(productIconSrc(pickedOtherProduct.id), 56)}</div>` : ''}
-      <div class="grid2" style="margin-bottom:8px;">
-        <div class="stat"><div class="label">ราคาขาย/${escapeHtml(pickedOtherProduct.unit||'ชิ้น')}</div><div class="value mono" style="font-size:17px;">฿${fmtMoney(pickedOtherProduct.price)}</div></div>
-        <div class="stat"><div class="label">ต้นทุน/${escapeHtml(pickedOtherProduct.unit||'ชิ้น')}</div><div class="value mono" style="font-size:17px;">฿${fmtMoney(pickedOtherProduct.cost)}</div></div>
+      ${!otherProductsCardExpanded ? '' : (
+        !state.otherProducts.length ? `<div class="rem-meta">ยังไม่มีสินค้าอื่นในระบบ กด "เพิ่มสินค้า" เพื่อเริ่มบันทึก</div>` : `
+      <div class="grid2" style="margin-bottom:0;">
+        ${state.otherProducts.map(p=>{
+          const profit = Number(p.cost||0)>0 ? Number(p.price||0) - Number(p.cost||0) : null;
+          return `<div class="stat" data-edit-other-product="${escapeAttr(p.id)}" style="cursor:pointer;">
+            <div class="label" style="display:flex;align-items:center;gap:6px;">${iconImgHtml(productIconSrc(p.id), 26)}${escapeHtml(p.name)}</div>
+            <div class="value mono" style="font-size:17px;">฿${fmtMoney(p.price)}</div>
+            ${profit!==null
+              ? `<div class="rem-meta" style="margin-top:2px;color:${profit>=0?'var(--green)':'var(--red)'};">กำไร ${profit>=0?'+':''}฿${fmtMoney(profit)} (ทุน ฿${fmtMoney(p.cost)}/${escapeHtml(p.unit||'ชิ้น')})</div>`
+              : `<div class="rem-meta" style="margin-top:2px;">ยังไม่มีข้อมูลต้นทุน</div>`}
+          </div>`;
+        }).join('')}
       </div>
-      ${otherProductProfit!==null
-        ? `<div class="rem-meta" style="margin-bottom:8px;color:${otherProductProfit>=0?'var(--green)':'var(--red)'};">กำไร ${otherProductProfit>=0?'+':''}฿${fmtMoney(otherProductProfit)} ต่อ${escapeHtml(pickedOtherProduct.unit||'ชิ้น')}</div>`
-        : `<div class="rem-meta" style="margin-bottom:8px;">ยังไม่ได้ใส่ราคาต้นทุน</div>`}
-      <div class="btnrow">
-        <button class="btn ghost small" data-edit-other-product="${escapeAttr(pickedOtherProduct.id)}">แก้ไข</button>
-        <button class="btn danger small" data-del-other-product="${escapeAttr(pickedOtherProduct.id)}">ลบ</button>
-      </div>` : ''}
-      `}
+      <div class="rem-meta" style="margin-top:8px;">แตะการ์ดสินค้าเพื่อแก้ไขราคา/ต้นทุน/รูป หรือลบสินค้านั้น</div>
+      `)}
     </div>`;
 
   const inventoryCard = `
@@ -1561,6 +1575,7 @@ function renderDashboard(){
     ${dailySummaryButtonRow}
     ${plCard}
     ${priceCard}
+    ${otherProductsCard}
     ${inventoryCard}
     ${purchaseCard}
     ${upcomingReorders.length? `
@@ -1653,6 +1668,8 @@ function openEditPricesForm(){
 // the same way it already does for the 4 gas sizes
 function openOtherProductForm(id){
   const p = id ? state.otherProducts.find(x=>x.id===id) : null;
+  let pendingCustomIcon = p ? (p.customIcon || null) : null;
+  const previewSrc = p ? (productIconSrc(p.id) || '') : '';
   const body = `
     <h3>${p? 'แก้ไขสินค้า' : 'เพิ่มสินค้าใหม่'}</h3>
     <form class="panel" id="otherProductForm" novalidate>
@@ -1663,6 +1680,14 @@ function openOtherProductForm(id){
         <div class="field"><label>ราคาต้นทุน (บาท)</label><input type="number" min="0" step="1" id="f_opCost" value="${p? p.cost||0:0}"></div>
       </div>
       <div class="field"><label>หน่วย</label><input id="f_opUnit" value="${p? escapeAttr(p.unit||'ชิ้น') : 'ชิ้น'}" placeholder="เช่น ชิ้น, เมตร, ถัง, ชุด"></div>
+      <div class="field">
+        <label>รูปไอค่อนสินค้า (ไม่บังคับ — จะถูกปรับขนาดเป็น 32x32 อัตโนมัติ)</label>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <img id="opIconPreview" src="${previewSrc}" style="width:48px;height:48px;image-rendering:pixelated;border:1px solid var(--border);border-radius:6px;background:#fff;object-fit:contain;${previewSrc?'':'display:none;'}">
+          <input type="file" accept="image/*" id="f_opImageFile" style="flex:1;">
+          <button type="button" class="btn ghost small" id="removeOpIconBtn" style="${pendingCustomIcon?'':'display:none;'}">ลบรูป</button>
+        </div>
+      </div>
       <div class="btnrow">
         <button type="submit" class="btn primary">บันทึก</button>
         ${p? `<button type="button" class="btn danger" id="deleteOtherProductBtn">ลบสินค้านี้</button>` : ''}
@@ -1670,6 +1695,36 @@ function openOtherProductForm(id){
       </div>
     </form>`;
   showModal(body);
+  document.getElementById('f_opImageFile').addEventListener('change', e=>{
+    const file = e.target.files[0];
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = ev=>{
+      const img = new Image();
+      img.onload = ()=>{
+        const canvas = document.createElement('canvas');
+        canvas.width = 32; canvas.height = 32;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, 32, 32);
+        pendingCustomIcon = canvas.toDataURL('image/png');
+        const preview = document.getElementById('opIconPreview');
+        preview.src = pendingCustomIcon;
+        preview.style.display = '';
+        document.getElementById('removeOpIconBtn').style.display = '';
+      };
+      img.src = ev.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+  document.getElementById('removeOpIconBtn').addEventListener('click', ()=>{
+    pendingCustomIcon = null;
+    document.getElementById('f_opImageFile').value = '';
+    const fallback = p ? (PRODUCT_ID_ICON_KEY[p.id] ? (PRODUCT_ICONS[PRODUCT_ID_ICON_KEY[p.id]]||'') : '') : '';
+    const preview = document.getElementById('opIconPreview');
+    preview.src = fallback;
+    preview.style.display = fallback? '' : 'none';
+    document.getElementById('removeOpIconBtn').style.display = 'none';
+  });
   if(p){
     document.getElementById('deleteOtherProductBtn').addEventListener('click', ()=>{
       if(confirm(`ลบสินค้า "${p.name}" ใช่หรือไม่?`)){
@@ -1693,7 +1748,8 @@ function openOtherProductForm(id){
       name,
       price: Number(document.getElementById('f_opPrice').value)||0,
       cost: Number(document.getElementById('f_opCost').value)||0,
-      unit: document.getElementById('f_opUnit').value.trim() || 'ชิ้น'
+      unit: document.getElementById('f_opUnit').value.trim() || 'ชิ้น',
+      customIcon: pendingCustomIcon || null
     };
     if(p){ Object.assign(p, data); }
     else {
@@ -2586,14 +2642,20 @@ function openAddDebtPrompt(id){
   const body = `
     <h3>เพิ่มยอดค้างชำระ — ${escapeHtml(c.name)}</h3>
     <form class="panel" id="addDebtForm" novalidate>
-      <div class="field"><label>ยอดค้างชำระปัจจุบัน</label>
-        <div class="mono" style="font-size:18px;color:var(--red);">฿${fmtMoney(c.debt||0)}</div>
+      <div class="field-row">
+        <div class="field"><label>ยอดค้างชำระปัจจุบัน</label>
+          <div class="mono" style="font-size:18px;color:var(--red);">฿${fmtMoney(c.debt||0)}</div>
+        </div>
+        <div class="field"><label>ถังที่ยืมอยู่ตอนนี้</label>
+          <div class="rem-meta" style="margin-top:4px;">${gasBreakdownSummary(c.gasCylindersBreakdown)||'ไม่มี'}</div>
+        </div>
       </div>
       <div class="field">
-        <label>จำนวนเงินที่จะเพิ่มเข้ายอดหนี้ (บาท) *</label>
-        <input type="number" min="0" step="0.01" id="f_amount">
-        <div id="amountError" class="rem-meta" style="color:var(--red);display:none;margin-top:4px;">กรุณากรอกจำนวนเงินมากกว่า 0</div>
+        <label>จำนวนเงินที่จะเพิ่มเข้ายอดหนี้ (บาท)</label>
+        <input type="number" min="0" step="0.01" id="f_amount" placeholder="0">
       </div>
+      <div class="field"><label>ถังแก๊สที่จะเพิ่มเข้ายอดหนี้ถัง (ถ้ามี)</label>${lineItemBuilderHtml('addDebtGasLine', [])}</div>
+      <div id="debtFormError" class="rem-meta" style="color:var(--red);display:none;margin-top:4px;">กรอกจำนวนเงิน หรือเพิ่มถัง อย่างน้อย 1 อย่าง</div>
       <div class="field"><label>หมายเหตุ</label><input id="f_note" placeholder="เช่น ค่าส่งของวันที่ 5 ก.ค."></div>
       <div class="btnrow">
         <button type="submit" class="btn primary">บันทึก</button>
@@ -2602,21 +2664,27 @@ function openAddDebtPrompt(id){
     </form>
   `;
   showModal(body);
+  renderLineItemsBox('addDebtGasLine');
   document.getElementById('addDebtForm').addEventListener('submit', e=>{
     e.preventDefault();
     const amt = Number(document.getElementById('f_amount').value)||0;
-    if(amt<=0){
-      document.getElementById('amountError').style.display = 'block';
-      document.getElementById('f_amount').focus();
+    const gasItems = (window._lineBuilders['addDebtGasLine']||[]).slice();
+    const gasQty = gasItems.reduce((a,i)=>a+Number(i.qty||0),0);
+    if(amt<=0 && gasQty<=0){
+      document.getElementById('debtFormError').style.display = 'block';
       return;
     }
     const note = document.getElementById('f_note').value.trim();
     adjustCustomerRemote(c.id, fresh=>{
       const updated = cloneCustomerForEdit(fresh);
-      updated.debt = Number(updated.debt||0) + amt;
+      if(amt>0) updated.debt = Number(updated.debt||0) + amt;
+      if(gasQty>0) addToCustomerGasBreakdown(updated, gasItems);
       return updated;
     }).then(()=>render());
-    state.sales.push({id:uid(), date:todayISO(), amount:amt, customerId:c.id, note: note||'เพิ่มยอดค้างชำระ', unpaid:true, createdAt: Date.now()});
+    const noteParts = [];
+    if(note) noteParts.push(note); else noteParts.push('เพิ่มยอดค้างชำระ');
+    if(gasQty>0) noteParts.push(`(+${gasBreakdownSummary(gasItems)})`);
+    state.sales.push({id:uid(), date:todayISO(), amount:amt, customerId:c.id, note: noteParts.join(' '), gasQty, gasBreakdown: gasItems, unpaid: amt>0, cylinderPending: gasQty>0, createdAt: Date.now()});
     persistSales();
     closeModal();
     render();
@@ -4379,6 +4447,8 @@ function attachHandlers(){
   if(otherProductSelect) otherProductSelect.addEventListener('change', ()=>{ selectedOtherProductId = otherProductSelect.value; render(); });
   const addOtherProductBtn = document.getElementById('addOtherProductBtn');
   if(addOtherProductBtn) addOtherProductBtn.addEventListener('click', ()=>openOtherProductForm(null));
+  const toggleOtherProductsBtn = document.getElementById('toggleOtherProductsBtn');
+  if(toggleOtherProductsBtn) toggleOtherProductsBtn.addEventListener('click', ()=>{ otherProductsCardExpanded = !otherProductsCardExpanded; render(); });
   document.querySelectorAll('[data-edit-other-product]').forEach(b=>b.addEventListener('click', ()=>openOtherProductForm(b.dataset.editOtherProduct)));
   document.querySelectorAll('[data-del-other-product]').forEach(b=>b.addEventListener('click', ()=>{
     const p = state.otherProducts.find(x=>x.id===b.dataset.delOtherProduct);
