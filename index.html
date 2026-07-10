@@ -445,6 +445,7 @@ function extractLatLngFromMapsUrl(url){
   return null;
 }
 let expandedMapIds = new Set();
+let openReminderMenuIds = new Set();
 let dashboardSort = 'recent';
 let dashboardExpandedIds = new Set();
 let debtorExpandedIds = new Set();
@@ -811,7 +812,7 @@ function gasSizeInputsHtml(prefix, existing, includeBrand){
     return `
     <div class="field" style="flex:1;min-width:${includeBrand?100:70}px;">
       <label style="font-size:11px;">${sz} kg</label>
-      <input type="number" min="0" id="${prefix}_${sz}" value="${qty>0? qty : ''}" placeholder="0">
+      <input type="text" inputmode="decimal" min="0" id="${prefix}_${sz}" value="${qty>0? qty : ''}" placeholder="0">
       ${includeBrand? `
       <div class="btnrow" style="margin-top:4px;gap:4px;">
         <button type="button" class="btn ghost small" data-qty-quick="${prefix}_${sz}" data-qty-val="1" style="padding:2px 8px;">1</button>
@@ -1281,17 +1282,17 @@ function openPurchaseForm(editId){
       </div>
       <div class="field" id="tipAmountField" style="${editing && editing.tipPaid ? '' : 'display:none;'}">
         <label>ค่าทิป (บาท/ถัง) — คูณกับจำนวนถังรวมทั้งหมดในเที่ยวนี้ให้อัตโนมัติ</label>
-        <input type="number" min="0" step="0.5" id="f_tipPerCylinder" value="${editing? (editing.tipPerCylinder||4) : 4}">
+        <input type="text" inputmode="decimal" min="0" step="0.5" id="f_tipPerCylinder" value="${editing? (editing.tipPerCylinder||4) : 4}">
       </div>
       <div class="field">
         <label>บิลที่ต้องจ่ายทั้งหมด (บาท)</label>
-        <input type="number" min="0" step="0.01" id="f_bill" value="${editing? editing.billAmount||0 : 0}">
+        <input type="text" inputmode="decimal" min="0" step="0.01" id="f_bill" value="${editing? editing.billAmount||0 : 0}">
         <button type="button" class="btn ghost small" id="calcBillFromCostBtn" style="margin-top:6px;">💡 คำนวณจากต้นทุนต่อถัง (ไม่รวมทิป)</button>
       </div>
       <div class="rem-meta" style="margin-bottom:6px;font-weight:700;">จ่ายไปแล้ว (แบ่งสด/โอนได้ ถ้าจ่ายไม่ครบเว้นว่างไว้)</div>
       <div class="field-row">
-        <div class="field"><label>💵 จ่ายสด (บาท)</label><input type="number" min="0" step="0.01" id="f_paidCash" value="${existingStatus? existingStatus.cash : 0}"></div>
-        <div class="field"><label>🏦 จ่ายโอน (บาท)</label><input type="number" min="0" step="0.01" id="f_paidTransfer" value="${existingStatus? existingStatus.transfer : 0}"></div>
+        <div class="field"><label>💵 จ่ายสด (บาท)</label><input type="text" inputmode="decimal" min="0" step="0.01" id="f_paidCash" value="${existingStatus? existingStatus.cash : 0}"></div>
+        <div class="field"><label>🏦 จ่ายโอน (บาท)</label><input type="text" inputmode="decimal" min="0" step="0.01" id="f_paidTransfer" value="${existingStatus? existingStatus.transfer : 0}"></div>
       </div>
       <div class="field"><label>หมายเหตุ</label><input id="f_note" value="${editing? escapeAttr(editing.note||''):''}"></div>
       <div class="btnrow">
@@ -1391,7 +1392,7 @@ function openPurchaseQuickPayForm(id){
       </div>
       <div class="field">
         <label>จำนวนเงิน (บาท) *</label>
-        <input type="number" min="0" step="0.01" id="f_qpAmount">
+        <input type="text" inputmode="decimal" min="0" step="0.01" id="f_qpAmount">
         <button type="button" class="btn ghost small" id="qpFullBtn" style="margin-top:6px;">💯 จ่ายส่วนที่เหลือทั้งหมด (฿${fmtMoney(s.remaining)})</button>
         <div id="qpError" class="rem-meta" style="color:var(--red);display:none;margin-top:4px;">กรุณากรอกจำนวนเงินมากกว่า 0</div>
       </div>
@@ -1450,6 +1451,10 @@ function renderDashboard(){
   // customers whose predicted delivery cycle says they're due (or overdue) within 2 days — stays
   // empty until enough order history builds up per customer (needs 3+ real deliveries to guess)
   const upcomingReorders = getUpcomingReorderCustomers(2);
+  // customers sitting on a banked ไทยช่วยไทย/บัตรประชารัฐ credit they haven't used yet — surfaced
+  // here regardless of reorder-cycle prediction status, since these are often first-time/irregular
+  // orderers who tapped their credit before ever actually buying gas
+  const pendingCreditCustomers = state.customers.filter(c=> Number(c.thaiChuayCredit||0)>0 || Number(c.prachanatCredit||0)>0);
   const unpaidBills = state.purchases.filter(p=>{
     if(p.archived) return false;
     const s = getPurchasePaymentStatus(p);
@@ -1608,6 +1613,21 @@ function renderDashboard(){
           <span class="tag ${cycle.daysUntilNext<0? 'debt':'gas'}">${cycle.daysUntilNext<0? `เลยรอบมา ${Math.abs(cycle.daysUntilNext)} วัน` : cycle.daysUntilNext===0? 'ถึงรอบวันนี้' : `อีก ${cycle.daysUntilNext} วัน`}</span>
         </div>
         <div class="rem-meta" style="margin-top:4px;">สั่งเฉลี่ยทุก ~${cycle.avgDays} วัน · ล่าสุด ${fmtDateShort(cycle.lastDate)}</div>
+        ${Number(c.thaiChuayCredit||0)>0 || Number(c.prachanatCredit||0)>0? `<div class="btnrow" style="margin-top:6px;">${Number(c.thaiChuayCredit||0)>0? `<span class="tag paid">🎫 ฿${fmtMoney(c.thaiChuayCredit)}</span>`:''}${Number(c.prachanatCredit||0)>0? `<span class="tag paid">🪪 ฿${fmtMoney(c.prachanatCredit)}</span>`:''}</div>` : ''}
+      </div>`).join('')}
+    ` : ''}
+    ${pendingCreditCustomers.length? `
+    <h2 class="section-title">🎫 มีเครดิตค้างใช้ (ไทยช่วยไทย/ประชารัฐ)</h2>
+    ${pendingCreditCustomers.map(c=>`
+      <div class="card" data-edit-cust="${c.id}" style="cursor:pointer;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div style="font-weight:700;">👤 ${escapeHtml(c.name)}</div>
+        </div>
+        <div class="btnrow" style="margin-top:4px;">
+          ${Number(c.thaiChuayCredit||0)>0? `<span class="tag paid">🎫 ไทยช่วยไทย ฿${fmtMoney(c.thaiChuayCredit)}</span>`:''}
+          ${Number(c.prachanatCredit||0)>0? `<span class="tag paid">🪪 ประชารัฐ ฿${fmtMoney(c.prachanatCredit)}</span>`:''}
+        </div>
+        <div class="rem-meta" style="margin-top:4px;">อย่าลืมหักเครดิตให้ตอนลูกค้าสั่งแก๊สครั้งหน้า</div>
       </div>`).join('')}
     ` : ''}
     <h2 class="section-title">แจ้งเตือนใกล้ถึง</h2>
@@ -1659,11 +1679,11 @@ function openEditPricesForm(){
     <h3>แก้ไขราคาแก๊สต่อถัง</h3>
     <form class="panel" id="pricesForm" novalidate>
       ${GAS_SIZES.map(sz=>`
-        <div class="field"><label>ราคาถัง ${sz} kg (บาท)</label><input type="number" min="0" step="1" id="price_${sz}" value="${state.gasPrices[sz]||0}"></div>
+        <div class="field"><label>ราคาถัง ${sz} kg (บาท)</label><input type="text" inputmode="decimal" min="0" step="1" id="price_${sz}" value="${state.gasPrices[sz]||0}"></div>
       `).join('')}
       <div class="rem-meta" style="margin:12px 0 6px;font-weight:700;">🏪 ส่วนลดกรณีมารับเองที่ร้าน</div>
       ${GAS_SIZES.map(sz=>`
-        <div class="field"><label>ลดถัง ${sz} kg (บาท/ถัง)</label><input type="number" min="0" step="1" id="pickup_${sz}" value="${state.pickupDiscount[sz]||0}"></div>
+        <div class="field"><label>ลดถัง ${sz} kg (บาท/ถัง)</label><input type="text" inputmode="decimal" min="0" step="1" id="pickup_${sz}" value="${state.pickupDiscount[sz]||0}"></div>
       `).join('')}
       <div class="rem-meta" style="margin-bottom:10px;">ราคาและส่วนลดนี้จะถูกใช้เป็นราคาแนะนำอัตโนมัติในหน้าเพิ่มงานส่ง/บันทึกยอดขายทุกที่</div>
       <div class="btnrow">
@@ -1698,8 +1718,8 @@ function openOtherProductForm(id){
       <div class="field"><label>ชื่อสินค้า *</label><input id="f_opName" value="${p? escapeAttr(p.name):''}" placeholder="เช่น สายแก๊ส"></div>
       <div id="opNameError" class="rem-meta" style="color:var(--red);display:none;">กรุณากรอกชื่อสินค้าก่อนบันทึก</div>
       <div class="field-row">
-        <div class="field"><label>ราคาขาย (บาท) *</label><input type="number" min="0" step="1" id="f_opPrice" value="${p? p.price||0:0}"></div>
-        <div class="field"><label>ราคาต้นทุน (บาท)</label><input type="number" min="0" step="1" id="f_opCost" value="${p? p.cost||0:0}"></div>
+        <div class="field"><label>ราคาขาย (บาท) *</label><input type="text" inputmode="decimal" min="0" step="1" id="f_opPrice" value="${p? p.price||0:0}"></div>
+        <div class="field"><label>ราคาต้นทุน (บาท)</label><input type="text" inputmode="decimal" min="0" step="1" id="f_opCost" value="${p? p.cost||0:0}"></div>
       </div>
       <div class="field"><label>หน่วย</label><input id="f_opUnit" value="${p? escapeAttr(p.unit||'ชิ้น') : 'ชิ้น'}" placeholder="เช่น ชิ้น, เมตร, ถัง, ชุด"></div>
       <div class="field">
@@ -1796,7 +1816,7 @@ function openQuickInventoryEdit(key){
   const body = `
     <h3>แก้ไข ${sz} kg · ${brandLabel} · ${typeLabel}</h3>
     <form class="panel" id="quickInvForm" novalidate>
-      <div class="field"><input type="number" min="0" id="f_quickInvVal" value="${current}"></div>
+      <div class="field"><input type="text" inputmode="decimal" min="0" id="f_quickInvVal" value="${current}"></div>
       <div class="btnrow">
         <button type="submit" class="btn primary">บันทึก</button>
         <button type="button" class="btn ghost" id="cancelModal">ยกเลิก</button>
@@ -1822,12 +1842,12 @@ function openEditInventoryForm(){
       ${GAS_SIZES.map(sz=>`
         <div class="rem-meta" style="font-weight:700;margin-bottom:6px;">${sz} kg</div>
         <div class="field-row" style="margin-bottom:10px;">
-          <div class="field"><label>ธรรมดา — เต็ม</label><input type="number" min="0" id="inv_${sz}_regular_full" value="${(state.inventory[sz]&&state.inventory[sz].regular&&state.inventory[sz].regular.full)||0}"></div>
-          <div class="field"><label>ธรรมดา — เปล่า</label><input type="number" min="0" id="inv_${sz}_regular_empty" value="${(state.inventory[sz]&&state.inventory[sz].regular&&state.inventory[sz].regular.empty)||0}"></div>
+          <div class="field"><label>ธรรมดา — เต็ม</label><input type="text" inputmode="decimal" min="0" id="inv_${sz}_regular_full" value="${(state.inventory[sz]&&state.inventory[sz].regular&&state.inventory[sz].regular.full)||0}"></div>
+          <div class="field"><label>ธรรมดา — เปล่า</label><input type="text" inputmode="decimal" min="0" id="inv_${sz}_regular_empty" value="${(state.inventory[sz]&&state.inventory[sz].regular&&state.inventory[sz].regular.empty)||0}"></div>
         </div>
         <div class="field-row" style="margin-bottom:14px;">
-          <div class="field"><label>🅿 ปตท — เต็ม</label><input type="number" min="0" id="inv_${sz}_ptt_full" value="${(state.inventory[sz]&&state.inventory[sz].ptt&&state.inventory[sz].ptt.full)||0}"></div>
-          <div class="field"><label>🅿 ปตท — เปล่า</label><input type="number" min="0" id="inv_${sz}_ptt_empty" value="${(state.inventory[sz]&&state.inventory[sz].ptt&&state.inventory[sz].ptt.empty)||0}"></div>
+          <div class="field"><label>🅿 ปตท — เต็ม</label><input type="text" inputmode="decimal" min="0" id="inv_${sz}_ptt_full" value="${(state.inventory[sz]&&state.inventory[sz].ptt&&state.inventory[sz].ptt.full)||0}"></div>
+          <div class="field"><label>🅿 ปตท — เปล่า</label><input type="text" inputmode="decimal" min="0" id="inv_${sz}_ptt_empty" value="${(state.inventory[sz]&&state.inventory[sz].ptt&&state.inventory[sz].ptt.empty)||0}"></div>
         </div>
       `).join('')}
       <div class="btnrow">
@@ -1925,7 +1945,7 @@ function openTransactionForm(){
       <div class="field"><label>วันที่</label><input type="date" id="f_txDate" value="${todayISO()}"></div>
       <div class="field">
         <label>จำนวนเงิน (บาท) *</label>
-        <input type="number" min="0" step="0.01" id="f_txAmount">
+        <input type="text" inputmode="decimal" min="0" step="0.01" id="f_txAmount">
         <div id="txAmountError" class="rem-meta" style="color:var(--red);display:none;margin-top:4px;">กรุณากรอกจำนวนเงินมากกว่า 0</div>
       </div>
       <div class="field"><label>รายละเอียด</label><input id="f_txNote" placeholder="เช่น ค่าน้ำมันรถส่ง, ค่าเช่าที่, รายรับพิเศษ"></div>
@@ -1968,10 +1988,15 @@ function getPLItems(type, period){
   let items = [];
   if(type==='income'){
     // ค้างจ่าย (unpaid) sales aren't cash yet — leave them out of the income breakdown; they'll
-    // show up here on whatever day the debt actually gets paid off instead
+    // show up here on whatever day the debt actually gets paid off instead.
+    // creditApplied (ไทยช่วยไทย prepaid credit used on this sale) and prachanatCreditApplied
+    // (บัตรประชารัฐ prepaid credit) were already counted as income back when the customer
+    // topped up those credits — so don't recognize them as income a second time here.
     state.sales.filter(s=>inPeriod(s.date) && !s.unpaid).forEach(s=>{
       const cust = state.customers.find(c=>c.id===s.customerId);
-      items.push({ date:s.date, amount:s.amount, note: cust? cust.name : (s.note||'ยอดขาย') });
+      const recognized = Number(s.amount||0) - Number(s.creditApplied||0) - Number(s.prachanatCreditApplied||0);
+      if(recognized<=0) return;
+      items.push({ date:s.date, amount:recognized, note: cust? cust.name : (s.note||'ยอดขาย') });
     });
     state.transactions.filter(t=>t.type==='income' && inPeriod(t.date)).forEach(t=>{
       items.push({ date:t.date, amount:t.amount, note: t.note||'รายรับอื่นๆ' });
@@ -2426,12 +2451,17 @@ function renderCustomerCard(c, opts){
     <div class="btnrow">
       ${Number(c.gasCylinders||0)>0? `<span class="tag gas">${gasBrandIconsHtml(c.gasCylindersBreakdown, 16) || '🛢️'} ยืมถัง ${c.gasCylinders} ใบ</span>`:''}
       ${Number(c.debt||0)>0? `<span class="tag debt">ค้างชำระ ฿${fmtMoney(c.debt)}</span>` : `<span class="tag paid">ไม่มีหนี้</span>`}
+      ${Number(c.thaiChuayCredit||0)>0? `<span class="tag paid">🎫 เครดิตไทยช่วยไทย ฿${fmtMoney(c.thaiChuayCredit)}${(c.thaiChuayCreditLog||[]).length? ` (กด ${c.thaiChuayCreditLog.reduce((a,l)=>a+Number(l.times||1),0)} ครั้ง รวม ฿${fmtMoney(c.thaiChuayCreditLog.reduce((a,l)=>a+Number(l.amount||0),0))})` : ''}</span>` : ''}
+      ${Number(c.prachanatCredit||0)>0? `<span class="tag paid">🪪 เครดิตประชารัฐ ฿${fmtMoney(c.prachanatCredit)}</span>` : ''}
     </div>
     ${c.notes? `<div class="rem-meta" style="margin-top:8px;">📝 ${escapeHtml(c.notes)}</div>`:''}
     <div class="btnrow">
       <button class="btn primary small" data-pay-cust="${c.id}">💰 ชำระเงิน</button>
       <button class="btn primary small" style="background:var(--orange);" data-return-cyl="${c.id}">🛢️ คืนถัง</button>
       <button class="btn ghost small" data-add-debt="${c.id}">➕ เพิ่มหนี้</button>
+      <button class="btn ghost small" data-add-credit="${c.id}">🎫 เครดิตไทยช่วยไทย</button>
+      <button class="btn ghost small" data-add-prachanat-credit="${c.id}">🪪 เครดิตประชารัฐ</button>
+      ${Number(c.debt||0)>0 && Number(c.thaiChuayCredit||0)>0? `<button class="btn ghost small" style="background:var(--green-bg);" data-reconcile-credit="${c.id}">⚖️ หักหนี้ด้วยเครดิต</button>` : ''}
       <button class="btn ghost small" data-reorder-cust="${c.id}">➕ สั่งอีกรอบ</button>
       ${opts.showClearAll? `<button class="btn primary small" style="background:var(--green);" data-clear-all-cust="${c.id}">✅ เคลียร์ครบ</button>` : ''}
     </div>
@@ -2496,7 +2526,12 @@ function openCustomerForm(id){
         <div class="rem-meta" style="margin-top:4px;">พิมพ์เองแยกจากลิงก์แผนที่ — เริ่มพิมพ์แล้วเลือกจากที่เคยบันทึกไว้ได้เลย ไม่ต้องพิมพ์ซ้ำ</div>
       </div>
       <div class="field"><label>ถังแก๊สที่ยืม (แยกขนาด/ยี่ห้อ)</label>${lineItemBuilderHtml('custGasLine', breakdownToLineItems(c? (c.gasCylindersBreakdown||[]) : []))}</div>
-      <div class="field"><label>ยอดค้างชำระ (บาท)</label><input type="number" min="0" id="f_debt" value="${c? c.debt||0:0}"></div>
+      <div class="field"><label>ยอดค้างชำระ (บาท)</label><input type="text" inputmode="decimal" min="0" id="f_debt" value="${c? c.debt||0:0}"></div>
+      <div class="field-row">
+        <div class="field"><label>🎫 เครดิตไทยช่วยไทยคงเหลือ (บาท)</label><input type="text" inputmode="decimal" min="0" id="f_thaiChuayCredit" value="${c? Number(c.thaiChuayCredit||0):0}"></div>
+        <div class="field"><label>🪪 เครดิตประชารัฐคงเหลือ (บาท)</label><input type="text" inputmode="decimal" min="0" id="f_prachanatCredit" value="${c? Number(c.prachanatCredit||0):0}"></div>
+      </div>
+      <div class="rem-meta" style="margin-top:-6px;margin-bottom:10px;">แก้ตรงนี้ไว้สำหรับแก้ไขยอดที่กรอกผิด/ปรับยอดเอง — ถ้าจะ "เพิ่ม" เครดิตใหม่ตามปกติ แนะนำให้ใช้ปุ่ม 🎫/🪪 เพิ่มเครดิตในหน้าลูกค้าแทน เพราะปุ่มนั้นจะบันทึกรายรับ+ประวัติการกดให้อัตโนมัติด้วย</div>
       <div class="field"><label>หมายเหตุ</label><textarea id="f_notes">${c? escapeHtml(c.notes||''):''}</textarea></div>
       <div class="btnrow">
         <button type="submit" class="btn primary" id="saveCustBtn">${c? 'บันทึกการแก้ไข':'บันทึกลูกค้า'}</button>
@@ -2557,6 +2592,8 @@ function openCustomerForm(id){
       gasCylindersBreakdown,
       gasCylinders: sumGasBreakdown(gasCylindersBreakdown),
       debt: Number(document.getElementById('f_debt').value)||0,
+      thaiChuayCredit: Math.max(0, Number(document.getElementById('f_thaiChuayCredit').value)||0),
+      prachanatCredit: Math.max(0, Number(document.getElementById('f_prachanatCredit').value)||0),
       notes: document.getElementById('f_notes').value.trim()
     };
     if(!data.name){
@@ -2583,7 +2620,7 @@ function openPaymentPrompt(id){
       </div>
       <div class="field">
         <label>จำนวนเงินที่รับชำระ (บาท) *</label>
-        <input type="number" min="0" step="0.01" id="f_amount">
+        <input type="text" inputmode="decimal" min="0" step="0.01" id="f_amount">
         <div id="amountError" class="rem-meta" style="color:var(--red);display:none;margin-top:4px;">กรุณากรอกจำนวนเงินมากกว่า 0</div>
         <button type="button" class="btn ghost small" id="fullAmountBtn" style="margin-top:6px;">💯 จ่ายเต็มจำนวน (฿${fmtMoney(c.debt||0)})</button>
       </div>
@@ -2674,7 +2711,7 @@ function openAddDebtPrompt(id){
       </div>
       <div class="field">
         <label>จำนวนเงินที่จะเพิ่มเข้ายอดหนี้ (บาท)</label>
-        <input type="number" min="0" step="0.01" id="f_amount" placeholder="0">
+        <input type="text" inputmode="decimal" min="0" step="0.01" id="f_amount" placeholder="0">
       </div>
       <div class="field"><label>ถังแก๊สที่จะเพิ่มเข้ายอดหนี้ถัง (ถ้ามี)</label>${lineItemBuilderHtml('addDebtGasLine', [])}</div>
       <div id="debtFormError" class="rem-meta" style="color:var(--red);display:none;margin-top:4px;">กรอกจำนวนเงิน หรือเพิ่มถัง อย่างน้อย 1 อย่าง</div>
@@ -2710,6 +2747,200 @@ function openAddDebtPrompt(id){
     persistSales();
     closeModal();
     render();
+  });
+}
+
+/* ---------------- ไทยช่วยไทยพลัส (60/40) credit — customers sometimes "tap" their daily ฿334
+   government co-pay quota on the app before actually taking gas, banking it as a prepaid credit
+   against a future real delivery. Real money lands in the shop's account the moment they tap, so
+   it's logged as income right away (via state.transactions) — separate from customer.debt because
+   it runs the opposite direction: the shop owes the customer gas value, not the other way around. ---------------- */
+function openAddThaiChuayCreditPrompt(id){
+  const c = state.customers.find(x=>x.id===id);
+  if(!c) return;
+  const body = `
+    <h3>🎫 เพิ่มเครดิตไทยช่วยไทย — ${escapeHtml(c.name)}</h3>
+    <div class="rem-meta" style="margin-bottom:10px;line-height:1.6;">ใช้ตอนลูกค้ากดสิทธิ์ (สูงสุด 334 บาท/วัน) ทิ้งไว้ล่วงหน้าโดยยังไม่มาเอาแก๊สจริง เงินจะถือว่าเข้าร้านแล้วตอนนี้เลย (นับเป็นรายรับทันที) แล้วเก็บเป็นเครดิตไว้หักตอนลูกค้ามาเอาแก๊สจริง</div>
+    <form class="panel" id="addCreditForm" novalidate>
+      <div class="field"><label>เครดิตคงเหลือปัจจุบัน</label>
+        <div class="mono" style="font-size:18px;color:var(--green);">฿${fmtMoney(c.thaiChuayCredit||0)}</div>
+        ${(c.thaiChuayCreditLog||[]).length? `<div class="rem-meta" style="margin-top:4px;">ประวัติกดสะสม: ${c.thaiChuayCreditLog.reduce((a,l)=>a+Number(l.times||1),0)} ครั้ง รวม ฿${fmtMoney(c.thaiChuayCreditLog.reduce((a,l)=>a+Number(l.amount||0),0))}</div>` : ''}
+      </div>
+      <div class="field">
+        <label>จำนวนครั้งที่กด (สูงสุด 334 บาท/ครั้ง)</label>
+        <div class="btnrow">${[1,2,3,4,5].map(n=>`<button type="button" class="btn ghost small" data-credit-times="${n}">×${n}</button>`).join('')}</div>
+      </div>
+      <div class="field">
+        <label>จำนวนเงินที่กดรวม (บาท) *</label>
+        <input type="text" inputmode="decimal" min="0" step="1" id="f_creditAmount" value="334">
+        <input type="hidden" id="f_creditTimes" value="1">
+        <div id="creditAmountError" class="rem-meta" style="color:var(--red);display:none;margin-top:4px;">กรุณากรอกจำนวนเงินมากกว่า 0</div>
+      </div>
+      <div class="field"><label>หมายเหตุ</label><input id="f_creditNote" placeholder="เช่น กดไทยช่วยไทยล่วงหน้า"></div>
+      <div class="btnrow">
+        <button type="submit" class="btn primary">บันทึก</button>
+        <button type="button" class="btn ghost" id="cancelModal">ยกเลิก</button>
+      </div>
+    </form>
+  `;
+  showModal(body);
+  document.querySelectorAll('[data-credit-times]').forEach(b=>b.addEventListener('click', ()=>{
+    const n = Number(b.dataset.creditTimes)||1;
+    document.getElementById('f_creditAmount').value = 334 * n;
+    document.getElementById('f_creditTimes').value = n;
+  }));
+  document.getElementById('addCreditForm').addEventListener('submit', e=>{
+    e.preventDefault();
+    const amt = Number(document.getElementById('f_creditAmount').value)||0;
+    if(amt<=0){
+      document.getElementById('creditAmountError').style.display = 'block';
+      document.getElementById('f_creditAmount').focus();
+      return;
+    }
+    const times = Math.max(1, Number(document.getElementById('f_creditTimes').value)||1);
+    const note = document.getElementById('f_creditNote').value.trim();
+    adjustCustomerRemote(c.id, fresh=>{
+      const updated = cloneCustomerForEdit(fresh);
+      updated.thaiChuayCredit = Number(updated.thaiChuayCredit||0) + amt;
+      // keeps a running tap-by-tap log (separate from the spendable balance above, which goes
+      // down as credit gets redeemed) so the shop can always see "กดไปกี่ครั้ง รวมกี่บาท" even
+      // after some of it has already been used against an order — "times" lets one entry represent
+      // several taps reported at once (e.g. "กด 334x2") without undercounting the real tap count
+      updated.thaiChuayCreditLog = [...(updated.thaiChuayCreditLog||[]), { id: uid(), date: todayISO(), amount: amt, times, note }];
+      return updated;
+    }).then(()=>render());
+    state.transactions.push({
+      id: uid(),
+      type: 'income',
+      date: todayISO(),
+      amount: amt,
+      note: `เครดิตไทยช่วยไทย — ${c.name}${note? ' ('+note+')' : ''}`
+    });
+    persistTransactions();
+    closeModal();
+    render();
+  });
+}
+
+// manual "settle debt against credit" reconciliation — used when a customer already has an old
+// unpaid debt AND separately has a banked ไทยช่วยไทย credit balance (e.g. they tapped it hoping
+// it'd cover an old bill rather than a brand-new order). Doesn't touch state.sales/income at all:
+// the credit's value was already recognized as income the moment it was topped up, so this is
+// purely an internal transfer between the two customer-record balances.
+function openReconcileThaiChuayPrompt(id){
+  const c = state.customers.find(x=>x.id===id);
+  if(!c) return;
+  const debt = Number(c.debt||0);
+  const credit = Number(c.thaiChuayCredit||0);
+  const usedCredit = Math.min(debt, credit);
+  const remainingDebt = debt - usedCredit;
+  const remainingCredit = credit - usedCredit;
+  const resultText = remainingDebt>0
+    ? `ใช้เครดิตหักหนี้ได้ ฿${fmtMoney(usedCredit)} — ลูกค้ายังต้องจ่ายเพิ่มอีก ฿${fmtMoney(remainingDebt)} (เก็บผ่าน "💰 ชำระเงิน" ได้เลยหลังกดยืนยัน)`
+    : `ใช้เครดิตหักหนี้ได้ ฿${fmtMoney(usedCredit)} — หนี้หมดพอดี/มีเครดิตเหลือ ฿${fmtMoney(remainingCredit)} เก็บไว้ใช้ครั้งหน้า`;
+  const body = `
+    <h3>⚖️ หักหนี้ด้วยเครดิตไทยช่วยไทย — ${escapeHtml(c.name)}</h3>
+    <div class="rem-meta" style="margin-bottom:10px;line-height:1.6;">ใช้ตอนลูกค้ามีทั้งหนี้เก่าค้างอยู่ และมีเครดิตไทยช่วยไทยที่กดทิ้งไว้ — เอาเครดิตไปหักหนี้ก้อนนี้โดยเฉพาะ (คนละอันกับปุ่ม "✅ เคลียร์ครบ" ที่เอาไว้ปิดหนี้+คืนถังทั้งหมดตอนลูกค้าจ่ายสดเต็มจำนวน)</div>
+    <div class="field"><label>หนี้ค้างชำระปัจจุบัน</label><div class="mono" style="font-size:18px;color:var(--red);">฿${fmtMoney(debt)}</div></div>
+    <div class="field"><label>เครดิตไทยช่วยไทยคงเหลือ</label><div class="mono" style="font-size:18px;color:var(--green);">฿${fmtMoney(credit)}</div></div>
+    <div class="rem-meta" style="margin:10px 0;line-height:1.6;">${resultText}</div>
+    <div class="btnrow">
+      <button type="button" class="btn primary" id="confirmReconcileBtn">ยืนยันหักหนี้</button>
+      <button type="button" class="btn ghost" id="cancelModal">ยกเลิก</button>
+    </div>
+  `;
+  showModal(body);
+  document.getElementById('confirmReconcileBtn').addEventListener('click', ()=>{
+    adjustCustomerRemote(c.id, fresh=>{
+      const updated = cloneCustomerForEdit(fresh);
+      const d = Number(updated.debt||0);
+      const cr = Number(updated.thaiChuayCredit||0);
+      const used = Math.min(d, cr);
+      updated.debt = d - used;
+      updated.thaiChuayCredit = cr - used;
+      return updated;
+    }).then(()=>render());
+    closeModal();
+    render();
+  });
+}
+
+function buildPrachanatCouponHtml(custName, amount, cards, note){
+  const dateStr = new Date().toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'numeric'});
+  const timeStr = new Date().toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
+  return `<div style="font-family:'Sarabun',sans-serif;font-size:2.2em;text-align:center;">
+    <div style="font-weight:bold;font-size:1.15em;">=== คูปองเครดิตบัตรประชารัฐ ===</div>
+    <div style="margin-top:6px;">${dateStr} ${timeStr} น.</div>
+    <div style="border-top:3px solid #000;margin:14px 0;"></div>
+    <div style="text-align:left;"><b>ลูกค้า:</b> ${escapeHtml(custName)}</div>
+    <div style="text-align:left;margin-top:6px;"><b>จำนวนบัตรที่กด:</b> ${cards} ใบ</div>
+    ${note? `<div style="text-align:left;margin-top:6px;"><b>หมายเหตุ:</b> ${escapeHtml(note)}</div>` : ''}
+    <div style="border-top:2px dashed #000;margin:14px 0;"></div>
+    <div style="font-weight:bold;font-size:1.4em;">เครดิตสะสม ฿${fmtMoney(amount)}</div>
+    <div style="border-top:3px solid #000;margin:14px 0;"></div>
+    <div style="font-size:0.8em;">เก็บใบนี้ไว้เป็นหลักฐาน — ยื่นให้ร้านตอนสั่งแก๊สครั้งหน้า เพื่อหักเป็นส่วนลดค่าแก๊ส</div>
+  </div>`;
+}
+
+function openAddPrachanatCreditPrompt(id){
+  const c = state.customers.find(x=>x.id===id);
+  if(!c) return;
+  const body = `
+    <h3>🪪 เพิ่มเครดิตบัตรประชารัฐ — ${escapeHtml(c.name)}</h3>
+    <div class="rem-meta" style="margin-bottom:10px;line-height:1.6;">ใช้ตอนลูกค้ากดสิทธิ์บัตรสวัสดิการแห่งรัฐ (฿80/ใบ กดได้หลายใบถ้ามีหลายบัตร) ไว้ล่วงหน้าโดยยังไม่มาเอาแก๊สจริง เงินจะถือว่าเข้าร้านแล้วตอนนี้เลย (นับเป็นรายรับทันที) แล้วเก็บเป็นเครดิตไว้หักตอนลูกค้ามาเอาแก๊สจริง — พิมพ์คูปองไว้เป็นหลักฐานกันลืมได้</div>
+    <form class="panel" id="addPrachanatCreditForm" novalidate>
+      <div class="field"><label>เครดิตคงเหลือปัจจุบัน</label>
+        <div class="mono" style="font-size:18px;color:var(--green);">฿${fmtMoney(c.prachanatCredit||0)}</div>
+      </div>
+      <div class="field">
+        <label>จำนวนบัตรที่กดวันนี้ (ใบ)</label>
+        <input type="text" inputmode="decimal" min="1" step="1" id="f_prachanatCards" value="1">
+      </div>
+      <div class="field">
+        <label>จำนวนเงินรวม (บาท) *</label>
+        <input type="text" inputmode="decimal" min="0" step="1" id="f_prachanatAmount" value="80">
+        <div id="prachanatAmountError" class="rem-meta" style="color:var(--red);display:none;margin-top:4px;">กรุณากรอกจำนวนเงินมากกว่า 0</div>
+      </div>
+      <div class="field"><label>หมายเหตุ</label><input id="f_prachanatNote" placeholder="เช่น กดบัตรประชารัฐล่วงหน้า"></div>
+      <div class="btnrow">
+        <button type="submit" class="btn primary">บันทึก</button>
+        <button type="button" class="btn ghost" id="cancelModal">ยกเลิก</button>
+      </div>
+    </form>
+  `;
+  showModal(body);
+  const cardsInput = document.getElementById('f_prachanatCards');
+  const amountInput = document.getElementById('f_prachanatAmount');
+  cardsInput.addEventListener('input', ()=>{
+    const n = Number(cardsInput.value)||0;
+    if(n>0) amountInput.value = n*80;
+  });
+  document.getElementById('addPrachanatCreditForm').addEventListener('submit', e=>{
+    e.preventDefault();
+    const amt = Number(amountInput.value)||0;
+    if(amt<=0){
+      document.getElementById('prachanatAmountError').style.display = 'block';
+      amountInput.focus();
+      return;
+    }
+    const cards = Number(cardsInput.value)||1;
+    const note = document.getElementById('f_prachanatNote').value.trim();
+    adjustCustomerRemote(c.id, fresh=>{
+      const updated = cloneCustomerForEdit(fresh);
+      updated.prachanatCredit = Number(updated.prachanatCredit||0) + amt;
+      return updated;
+    }).then(()=>render());
+    state.transactions.push({
+      id: uid(),
+      type: 'income',
+      date: todayISO(),
+      amount: amt,
+      note: `เครดิตบัตรประชารัฐ — ${c.name}${note? ' ('+note+')' : ''}`
+    });
+    persistTransactions();
+    closeModal();
+    render();
+    exportReceiptImage(`คูปองประชารัฐ_${c.name}`, buildPrachanatCouponHtml(c.name, amt, cards, note), 420);
   });
 }
 
@@ -2873,10 +3104,12 @@ function openSaleForm(presetCustomerId, editId){
       </div>
       <div class="field">
         <label>จำนวนเงิน (บาท) *</label>
-        <input type="number" min="0" step="0.01" id="f_amount" value="${editing? editing.amount : ''}">
+        <input type="text" inputmode="decimal" min="0" step="0.01" id="f_amount" value="${editing? editing.amount : ''}">
         <button type="button" class="btn ghost small" id="useSuggestedPriceBtnSale" style="margin-top:6px;">💡 ใช้ราคาแนะนำ</button>
         <div id="amountError" class="rem-meta" style="color:var(--red);display:none;margin-top:4px;">กรุณากรอกจำนวนเงินมากกว่า 0</div>
       </div>
+      <div id="saleCreditBox"></div>
+      <div id="salePrachanatCreditBox"></div>
       <div class="field"><label>รายละเอียด</label><input id="f_note" placeholder="เช่น ถังแก๊ส 15 กก." value="${editing? escapeAttr(editing.note||'') : ''}"></div>
       <div class="field">
         <label style="display:flex;align-items:center;gap:8px;font-weight:400;"><input type="checkbox" id="f_unpaid" style="width:auto;" ${editing && editing.unpaid?'checked':''}> ค้างจ่ายเงิน</label>
@@ -2892,6 +3125,42 @@ function openSaleForm(presetCustomerId, editId){
   renderLineItemsBox('sale');
   renderOtherLineItemsBox('saleOtherLine');
 
+  // shows a "ใช้เครดิตไทยช่วยไทย" field only when the currently-selected customer actually has a
+  // banked credit balance (see openAddThaiChuayCreditPrompt) — capped so it can never exceed either
+  // the credit on hand or the invoice amount itself
+  function renderSaleCreditBox(custId){
+    const box = document.getElementById('saleCreditBox');
+    if(!box) return;
+    const cust = custId? state.customers.find(c=>c.id===custId) : null;
+    const credit = cust? Number(cust.thaiChuayCredit||0) : 0;
+    if(credit<=0){ box.innerHTML=''; return; }
+    const prevVal = editing? Number(editing.creditApplied||0) : 0;
+    box.innerHTML = `<div class="field">
+      <label>🎫 ใช้เครดิตไทยช่วยไทย (มี ฿${fmtMoney(credit)})</label>
+      <input type="text" inputmode="decimal" min="0" step="1" id="f_creditApplied" max="${credit}" value="${prevVal||''}" placeholder="0">
+      <div class="rem-meta" style="margin-top:2px;">ใส่จำนวนที่จะหักจากเครดิตแทนเงินสด — ไม่นับซ้ำเป็นรายรับอีกรอบ (นับไปแล้วตอนกดเครดิต)</div>
+    </div>`;
+  }
+  renderSaleCreditBox(initialCustomerId);
+
+  // same idea as renderSaleCreditBox, but for the separate บัตรประชารัฐ credit ledger
+  // (see openAddPrachanatCreditPrompt) — kept as its own field/balance since the two programs
+  // have different rules (฿80/card vs ฿334/day) and shouldn't be mixed into one number
+  function renderSalePrachanatCreditBox(custId){
+    const box = document.getElementById('salePrachanatCreditBox');
+    if(!box) return;
+    const cust = custId? state.customers.find(c=>c.id===custId) : null;
+    const credit = cust? Number(cust.prachanatCredit||0) : 0;
+    if(credit<=0){ box.innerHTML=''; return; }
+    const prevVal = editing? Number(editing.prachanatCreditApplied||0) : 0;
+    box.innerHTML = `<div class="field">
+      <label>🪪 ใช้เครดิตบัตรประชารัฐ (มี ฿${fmtMoney(credit)})</label>
+      <input type="text" inputmode="decimal" min="0" step="1" id="f_prachanatCreditApplied" max="${credit}" value="${prevVal||''}" placeholder="0">
+      <div class="rem-meta" style="margin-top:2px;">ใส่จำนวนที่จะหักจากเครดิตแทนเงินสด — ไม่นับซ้ำเป็นรายรับอีกรอบ (นับไปแล้วตอนกดเครดิต)</div>
+    </div>`;
+  }
+  renderSalePrachanatCreditBox(initialCustomerId);
+
   const custSearchInput = document.getElementById('f_saleCustSearch');
   const custSuggestBox = document.getElementById('saleCustSuggestions');
   function renderSaleCustSuggestions(){
@@ -2905,11 +3174,15 @@ function openSaleForm(presetCustomerId, editId){
         document.getElementById('f_customer').value = el.dataset.pickCust;
         custSearchInput.value = picked.name;
         custSuggestBox.innerHTML = '';
+        renderSaleCreditBox(el.dataset.pickCust);
+        renderSalePrachanatCreditBox(el.dataset.pickCust);
       });
     });
   }
   custSearchInput.addEventListener('input', ()=>{
     document.getElementById('f_customer').value = '';
+    renderSaleCreditBox(null);
+    renderSalePrachanatCreditBox(null);
     renderSaleCustSuggestions();
   });
 
@@ -2953,9 +3226,18 @@ function openSaleForm(presetCustomerId, editId){
     const otherItems = (window._otherLineBuilders['saleOtherLine']||[]).slice();
     let note = document.getElementById('f_note').value.trim();
     if(!customerId && !typedName && !note) note = 'ลูกค้าหน้าร้าน';
+    const creditInput = document.getElementById('f_creditApplied');
+    const custForCredit = customerId? state.customers.find(c=>c.id===customerId) : null;
+    const availableCredit = custForCredit? Number(custForCredit.thaiChuayCredit||0) : 0;
+    const creditApplied = creditInput ? Math.max(0, Math.min(Number(creditInput.value)||0, availableCredit, amt)) : 0;
+    const prachanatCreditInput = document.getElementById('f_prachanatCreditApplied');
+    const availablePrachanatCredit = custForCredit? Number(custForCredit.prachanatCredit||0) : 0;
+    const prachanatCreditApplied = prachanatCreditInput ? Math.max(0, Math.min(Number(prachanatCreditInput.value)||0, availablePrachanatCredit, Math.max(0, amt - creditApplied))) : 0;
     const data = {
       date: document.getElementById('f_date').value || todayISO(),
       amount: amt,
+      creditApplied,
+      prachanatCreditApplied,
       customerId,
       note,
       gasQty: sumGasBreakdown(breakdown),
@@ -2969,11 +3251,15 @@ function openSaleForm(presetCustomerId, editId){
     else {
       state.sales.push({ id:uid(), ...data, createdAt: Date.now() });
       applyDeliveryToInventory(data.gasBreakdown, data.cylinderPending);
-      applyDeliveryToTruckStock(data.gasBreakdown, data.cylinderPending);
+      // ลูกค้าหน้าร้าน (pickup) มารับถังที่ร้านเองโดยตรง ไม่ได้ผ่านรถส่งของ — ไม่ควรหักถังในรถ
+      if(!data.pickup) applyDeliveryToTruckStock(data.gasBreakdown, data.cylinderPending);
       if(customerId){
         adjustCustomerRemote(customerId, fresh=>{
           const updated = cloneCustomerForEdit(fresh);
-          if(data.unpaid && amt>0) updated.debt = Number(updated.debt||0) + amt;
+          const residual = Math.max(0, amt - creditApplied - prachanatCreditApplied);
+          if(data.unpaid && residual>0) updated.debt = Number(updated.debt||0) + residual;
+          if(creditApplied>0) updated.thaiChuayCredit = Math.max(0, Number(updated.thaiChuayCredit||0) - creditApplied);
+          if(prachanatCreditApplied>0) updated.prachanatCredit = Math.max(0, Number(updated.prachanatCredit||0) - prachanatCreditApplied);
           if(data.cylinderPending && data.gasQty>0) addToCustomerGasBreakdown(updated, breakdownToLineItems(breakdown));
           return updated;
         }).then(()=>render());
@@ -3613,6 +3899,29 @@ function computeTodayTasksGasBreakdown(){
 function truckStockFullTotal(){ return (state.truckStock||[]).reduce((a,i)=>a+Number(i.full||0),0); }
 function truckStockEmptyTotal(){ return (state.truckStock||[]).reduce((a,i)=>a+Number(i.empty||0),0); }
 function truckStockTotal(){ return truckStockFullTotal() + truckStockEmptyTotal(); }
+// checks one task's ordered breakdown against what's currently loaded on the truck (FULL tanks
+// only — an empty on the truck can't fulfill a new order) per size/brand. Compares against the
+// truck's current total only (doesn't reserve stock across multiple pending tasks), so it's a
+// "does the truck even have enough of this variant right now" check rather than a full route plan.
+function getTruckStockShortfall(breakdown){
+  const items = breakdownToLineItems(breakdown||[]);
+  const shortfalls = [];
+  items.forEach(item=>{
+    if(!item.qty) return;
+    const entry = (state.truckStock||[]).find(l=>l.size===item.size && l.brand===item.brand);
+    const have = entry? Number(entry.full||0) : 0;
+    if(have < item.qty) shortfalls.push({ size:item.size, brand:item.brand, need:item.qty, have });
+  });
+  return shortfalls;
+}
+// checks every task on today's งานส่ง list against the truck's current stock, for the "⚠️ ถังในรถ
+// ไม่พอ" summary shown inside the ถังบนรถ modal (see openTruckStockModal) rather than cluttering
+// every individual task card
+function getAllTaskTruckShortfalls(){
+  return state.tasks
+    .map(t=>({ t, shortfall: getTruckStockShortfall(t.gasBreakdown) }))
+    .filter(x=>x.shortfall.length);
+}
 // full tanks render normally; empty ones render faded/grayscale so anyone glancing at the bar (not
 // just the driver) can tell full vs. empty apart at a glance without opening the modal
 function truckStockIconsHtml(size){
@@ -3633,6 +3942,19 @@ function refreshTruckStockModal(){
     </div>`;
   }
   renderTruckStockRows();
+  const shortfallBox = document.getElementById('truckShortfallBox');
+  if(shortfallBox){
+    const shortfalls = getAllTaskTruckShortfalls();
+    shortfallBox.innerHTML = shortfalls.length? `
+      <div class="stamp-card" style="margin-bottom:10px;border-color:var(--red);">
+        <div style="font-weight:700;color:var(--red);margin-bottom:6px;">⚠️ ถังในรถไม่พอสำหรับ ${shortfalls.length} ราย</div>
+        ${shortfalls.map(({t, shortfall})=>{
+          const cust = t.customerId? state.customers.find(c=>c.id===t.customerId) : null;
+          const name = cust? cust.name : (t.customName||'ไม่ระบุชื่อ');
+          return `<div class="rem-meta" style="margin-bottom:4px;">👤 <b>${escapeHtml(name)}</b> — ${shortfall.map(s=>`${GAS_BRAND_LABELS[s.brand]} ${s.size}kg ขาด ${s.need-s.have} (มี ${s.have}/${s.need})`).join(', ')}</div>`;
+        }).join('')}
+      </div>` : '';
+  }
 }
 function renderTruckStockRows(){
   const box = document.getElementById('truckStockRows');
@@ -3690,6 +4012,7 @@ function openTruckStockModal(){
   const body = `
     <h3>🚚 ถังบนรถ</h3>
     <div class="rem-meta" style="margin-bottom:10px;line-height:1.6;">ใช้ติดตามว่าวันนี้โหลดถังขึ้นรถไปกี่ใบ แยกขนาด/ยี่ห้อ/เต็ม-เปล่า แก้ตรงนี้เครื่องไหนก็เห็นตรงกันหมด (กดส่งเสร็จแล้วถังนั้นจะเปลี่ยนเป็นเปล่าให้อัตโนมัติ)</div>
+    <div id="truckShortfallBox"></div>
     <div id="truckStockSummaryBar"></div>
     <div id="truckStockRows" style="margin-bottom:10px;"></div>
     <div class="field-row" style="align-items:flex-end;">
@@ -3699,7 +4022,7 @@ function openTruckStockModal(){
       </div>
       <div class="field" style="flex:1;">
         <label style="font-size:11px;">จำนวน</label>
-        <input type="number" min="1" id="truckAddQty" placeholder="1" value="1">
+        <input type="text" inputmode="decimal" min="1" id="truckAddQty" placeholder="1" value="1">
       </div>
       <div class="field" style="flex:1;">
         <label style="font-size:11px;">ยี่ห้อ</label>
@@ -3916,9 +4239,10 @@ function renderTasks(){
 
   // "ถังบนรถ" — manual tally of tanks physically loaded onto the delivery vehicle today; tap to
   // add/remove/clear (see openTruckStockModal). Shown even with 0 so the driver always has quick access.
+  const truckShortfalls = getAllTaskTruckShortfalls();
   const truckBar = `
     <div class="debtor-total" data-open-truck-stock="1" style="cursor:pointer;flex-wrap:wrap;gap:8px;align-items:center;">
-      <span>🚚 ถังบนรถ</span>
+      <span>🚚 ถังบนรถ${truckShortfalls.length? ` <span style="color:var(--red);font-weight:700;">⚠️ ${truckShortfalls.length} ราย</span>` : ''}</span>
       <span style="display:flex;flex-wrap:wrap;gap:2px;flex:1;min-width:80px;">${truckStockIconsHtml(26) || '<span class="rem-meta" style="color:#B9BCB2;">ยังไม่มี</span>'}</span>
       <div style="text-align:right;">
         <div class="amt" style="line-height:1.2;">${fmtMoney(truckStockTotal())} ถัง</div>
@@ -4229,9 +4553,11 @@ function openTaskCompleteForm(taskId){
       </div>
       <div class="field">
         <label>จำนวนเงินที่ได้รับ (บาท)</label>
-        <input type="number" min="0" step="0.01" id="f_amount" value="0">
+        <input type="text" inputmode="decimal" min="0" step="0.01" id="f_amount" value="0">
         <button type="button" class="btn ghost small" id="useSuggestedPriceBtn" style="margin-top:6px;">💡 ใช้ราคาแนะนำ</button>
       </div>
+      <div id="taskCompleteCreditBox"></div>
+      <div id="taskCompletePrachanatCreditBox"></div>
       <div class="field">
         <label style="display:flex;align-items:center;gap:8px;font-weight:400;"><input type="checkbox" id="f_unpaid" style="width:auto;"> ยังไม่จ่ายเงิน (ค้างจ่าย)</label>
         <label style="display:flex;align-items:center;gap:8px;font-weight:400;margin-top:6px;"><input type="checkbox" id="f_cylpending" style="width:auto;"> ยังไม่คืนถังเปล่า (ค้างถัง)</label>
@@ -4249,6 +4575,28 @@ function openTaskCompleteForm(taskId){
   showModal(body);
   renderLineItemsBox('taskCompleteLine');
   renderOtherLineItemsBox('taskCompleteOtherLine');
+  (function renderTaskCompleteCreditBox(){
+    const box = document.getElementById('taskCompleteCreditBox');
+    if(!box) return;
+    const credit = cust? Number(cust.thaiChuayCredit||0) : 0;
+    if(credit<=0){ box.innerHTML=''; return; }
+    box.innerHTML = `<div class="field">
+      <label>🎫 ใช้เครดิตไทยช่วยไทย (มี ฿${fmtMoney(credit)})</label>
+      <input type="text" inputmode="decimal" min="0" step="1" id="f_creditApplied" max="${credit}" placeholder="0">
+      <div class="rem-meta" style="margin-top:2px;">ใส่จำนวนที่จะหักจากเครดิตแทนเงินสด — ไม่นับซ้ำเป็นรายรับอีกรอบ (นับไปแล้วตอนกดเครดิต)</div>
+    </div>`;
+  })();
+  (function renderTaskCompletePrachanatCreditBox(){
+    const box = document.getElementById('taskCompletePrachanatCreditBox');
+    if(!box) return;
+    const credit = cust? Number(cust.prachanatCredit||0) : 0;
+    if(credit<=0){ box.innerHTML=''; return; }
+    box.innerHTML = `<div class="field">
+      <label>🪪 ใช้เครดิตบัตรประชารัฐ (มี ฿${fmtMoney(credit)})</label>
+      <input type="text" inputmode="decimal" min="0" step="1" id="f_prachanatCreditApplied" max="${credit}" placeholder="0">
+      <div class="rem-meta" style="margin-top:2px;">ใส่จำนวนที่จะหักจากเครดิตแทนเงินสด — ไม่นับซ้ำเป็นรายรับอีกรอบ (นับไปแล้วตอนกดเครดิต)</div>
+    </div>`;
+  })();
   document.getElementById('useSuggestedPriceBtn').addEventListener('click', ()=>{
     const b = window._lineBuilders['taskCompleteLine']||[];
     const pickup = document.getElementById('f_pickup').checked;
@@ -4260,9 +4608,17 @@ function openTaskCompleteForm(taskId){
     const otherItems = (window._otherLineBuilders['taskCompleteOtherLine']||[]).slice();
     const gasQty = sumGasBreakdown(breakdown);
     const amt = Number(document.getElementById('f_amount').value)||0;
+    const pickup = document.getElementById('f_pickup').checked;
     const unpaid = document.getElementById('f_unpaid').checked;
     const cylinderPending = document.getElementById('f_cylpending').checked;
     const saveAsCustomer = isNewName && document.getElementById('f_saveAsCustomer') && document.getElementById('f_saveAsCustomer').checked;
+    const creditInput = document.getElementById('f_creditApplied');
+    const availableCredit = (cust && !saveAsCustomer)? Number(cust.thaiChuayCredit||0) : 0;
+    const creditApplied = creditInput ? Math.max(0, Math.min(Number(creditInput.value)||0, availableCredit, amt)) : 0;
+    const prachanatCreditInput = document.getElementById('f_prachanatCreditApplied');
+    const availablePrachanatCredit = (cust && !saveAsCustomer)? Number(cust.prachanatCredit||0) : 0;
+    const prachanatCreditApplied = prachanatCreditInput ? Math.max(0, Math.min(Number(prachanatCreditInput.value)||0, availablePrachanatCredit, Math.max(0, amt - creditApplied))) : 0;
+    const residual = Math.max(0, amt - creditApplied - prachanatCreditApplied);
 
     let finalCustomerId = t.customerId || null;
 
@@ -4278,7 +4634,7 @@ function openTaskCompleteForm(taskId){
         landmark: t.landmark || '',
         gasCylindersBreakdown: cylinderPending? breakdownToLineItems(breakdown) : [],
         gasCylinders: cylinderPending? gasQty : 0,
-        debt: unpaid? amt : 0,
+        debt: unpaid? residual : 0,
         notes: t.note || ''
       };
       state.customers.push(newCust);
@@ -4288,19 +4644,25 @@ function openTaskCompleteForm(taskId){
 
     if(amt>0 || gasQty>0 || otherItems.length){
       state.sales.push({
-        id: uid(), date: todayISO(), amount: amt,
+        id: uid(), date: todayISO(), amount: amt, creditApplied, prachanatCreditApplied,
         customerId: finalCustomerId,
         note: finalCustomerId? '' : displayName,
-        gasQty, gasBreakdown: breakdown, otherItems, unpaid, cylinderPending,
+        gasQty, gasBreakdown: breakdown, otherItems, pickup, unpaid, cylinderPending,
         createdAt: Date.now()
       });
       persistSales();
     }
-    if(gasQty>0){ applyDeliveryToInventory(breakdown, cylinderPending); applyDeliveryToTruckStock(breakdown, cylinderPending); }
+    if(gasQty>0){
+      applyDeliveryToInventory(breakdown, cylinderPending);
+      // ลูกค้าหน้าร้าน (pickup) มารับถังที่ร้านเองโดยตรง ไม่ได้ผ่านรถส่งของ — ไม่ควรหักถังในรถ
+      if(!pickup) applyDeliveryToTruckStock(breakdown, cylinderPending);
+    }
     if(t.customerId && !saveAsCustomer){
       adjustCustomerRemote(t.customerId, fresh=>{
         const updated = cloneCustomerForEdit(fresh);
-        if(unpaid && amt>0) updated.debt = Number(updated.debt||0) + amt;
+        if(unpaid && residual>0) updated.debt = Number(updated.debt||0) + residual;
+        if(creditApplied>0) updated.thaiChuayCredit = Math.max(0, Number(updated.thaiChuayCredit||0) - creditApplied);
+        if(prachanatCreditApplied>0) updated.prachanatCredit = Math.max(0, Number(updated.prachanatCredit||0) - prachanatCreditApplied);
         if(cylinderPending && gasQty>0) addToCustomerGasBreakdown(updated, breakdownToLineItems(breakdown));
         return updated;
       }).then(()=>render());
@@ -4329,37 +4691,46 @@ function renderReminderCard(r){
   const overdue = !r.done && r.dueDate < todayISO();
   const repeatLabel = {once:'ครั้งเดียว',daily:'ทุกวัน',weekly:'ทุกสัปดาห์',yearly:'ทุกปี'}[r.repeat];
   const cust = state.customers.find(c=>c.id===r.customerId);
+  const menuOpen = openReminderMenuIds.has(r.id);
   return `
   <div class="card rem-card">
     <div class="checkbox ${r.done?'done':''} ${overdue?'overdue':''}" data-toggle-rem="${r.id}">${r.done?'✓':''}</div>
     <div style="flex:1;">
-      <div class="rem-title">${escapeHtml(r.title)}</div>
-      <div class="rem-meta ${overdue?'overdue':''}">${fmtDateShort(r.dueDate)} · ${repeatLabel}${cust? ' · '+escapeHtml(cust.name):''}${overdue?' · เลยกำหนด':''}</div>
-      <div class="btnrow">
-        <button class="btn danger small" data-del-rem="${r.id}">ลบ</button>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
+        <div class="rem-title">${escapeHtml(r.title)}</div>
+        <button type="button" class="btn ghost small" style="padding:2px 10px;" data-toggle-rem-menu="${r.id}">⋮</button>
       </div>
+      <div class="rem-meta ${overdue?'overdue':''}">${fmtDateShort(r.dueDate)} · ${repeatLabel}${cust? ' · '+escapeHtml(cust.name):''}${overdue?' · เลยกำหนด':''}</div>
+      ${menuOpen? `
+      <div class="btnrow" style="margin-top:6px;">
+        <button class="btn ghost small" data-edit-rem="${r.id}">✏️ แก้ไข</button>
+        <button class="btn ghost small" data-toggle-rem="${r.id}">${r.done? '↩️ ยังไม่เสร็จ' : '✓ ทำเครื่องหมายเสร็จ'}</button>
+        <button class="btn danger small" data-del-rem="${r.id}">🗑️ ลบ</button>
+      </div>` : ''}
     </div>
   </div>`;
 }
 
-function openReminderForm(presetTitle, presetCustomerId){
-  const presetCust = presetCustomerId? state.customers.find(c=>c.id===presetCustomerId) : null;
+function openReminderForm(presetTitle, presetCustomerId, editId){
+  const editing = editId? state.reminders.find(r=>r.id===editId) : null;
+  const presetCust = editing? (editing.customerId? state.customers.find(c=>c.id===editing.customerId) : null)
+    : (presetCustomerId? state.customers.find(c=>c.id===presetCustomerId) : null);
   const body = `
-    <h3>เพิ่มแจ้งเตือน</h3>
+    <h3>${editing? 'แก้ไขแจ้งเตือน' : 'เพิ่มแจ้งเตือน'}</h3>
     <form class="panel" id="remForm" novalidate>
       <div class="field">
         <label>หัวข้อ *</label>
-        <input id="f_title" placeholder="เช่น เก็บเงินค่าถังแก๊ส" value="${escapeAttr(presetTitle||'')}">
+        <input id="f_title" placeholder="เช่น เก็บเงินค่าถังแก๊ส" value="${escapeAttr(editing? editing.title : (presetTitle||''))}">
         <div id="titleError" class="rem-meta" style="color:var(--red);display:none;margin-top:4px;">กรุณากรอกหัวข้อก่อนบันทึก</div>
       </div>
       <div class="field-row">
-        <div class="field"><label>วันครบกำหนด</label><input type="date" id="f_due" value="${todayISO()}"></div>
+        <div class="field"><label>วันครบกำหนด</label><input type="date" id="f_due" value="${editing? editing.dueDate : todayISO()}"></div>
         <div class="field"><label>ความถี่</label>
           <select id="f_repeat">
-            <option value="once">ครั้งเดียว</option>
-            <option value="daily">รายวัน</option>
-            <option value="weekly">รายสัปดาห์</option>
-            <option value="yearly">รายปี</option>
+            <option value="once" ${editing && editing.repeat==='once'?'selected':''}>ครั้งเดียว</option>
+            <option value="daily" ${editing && editing.repeat==='daily'?'selected':''}>รายวัน</option>
+            <option value="weekly" ${editing && editing.repeat==='weekly'?'selected':''}>รายสัปดาห์</option>
+            <option value="yearly" ${editing && editing.repeat==='yearly'?'selected':''}>รายปี</option>
           </select>
         </div>
       </div>
@@ -4371,6 +4742,7 @@ function openReminderForm(presetTitle, presetCustomerId){
       </div>
       <div class="btnrow">
         <button type="submit" class="btn primary">บันทึก</button>
+        ${editing? `<button type="button" class="btn danger" id="deleteRemBtn">ลบแจ้งเตือนนี้</button>` : ''}
         <button type="button" class="btn ghost" id="cancelModal">ยกเลิก</button>
       </div>
     </form>`;
@@ -4396,6 +4768,17 @@ function openReminderForm(presetTitle, presetCustomerId){
     document.getElementById('f_customer').value = '';
     renderSuggestions();
   });
+  if(editing){
+    document.getElementById('deleteRemBtn').addEventListener('click', ()=>{
+      if(confirm('ลบแจ้งเตือนนี้ใช่หรือไม่?')){
+        state.reminders = state.reminders.filter(r=>r.id!==editId);
+        openReminderMenuIds.delete(editId);
+        persistReminders();
+        closeModal();
+        render();
+      }
+    });
+  }
 
   document.getElementById('remForm').addEventListener('submit', e=>{
     e.preventDefault();
@@ -4405,13 +4788,18 @@ function openReminderForm(presetTitle, presetCustomerId){
       document.getElementById('f_title').focus();
       return;
     }
-    state.reminders.push({
-      id:uid(), title,
+    const data = {
+      title,
       dueDate: document.getElementById('f_due').value || todayISO(),
       repeat: document.getElementById('f_repeat').value,
-      customerId: document.getElementById('f_customer').value || null,
-      done:false
-    });
+      customerId: document.getElementById('f_customer').value || null
+    };
+    if(editing){
+      Object.assign(editing, data);
+      openReminderMenuIds.delete(editId);
+    } else {
+      state.reminders.push({ id:uid(), ...data, done:false });
+    }
     persistReminders();
     closeModal();
     render();
@@ -4452,6 +4840,33 @@ document.getElementById('modalRoot').addEventListener('click', e=>{
   if(el) el.value = btn.dataset.qtyVal;
 });
 
+// inline calculator: every numeric field in the app is a plain text input (see the global
+// type="number" -> type="text" inputmode="decimal" swap) specifically so people can type a quick
+// sum like "334*3" or "500-166" straight into any amount/quantity box. When the field loses focus,
+// if (and only if) what's typed looks like a pure arithmetic expression (digits/+-*/()./space only,
+// with at least one operator so a plain "334" is left alone) it gets evaluated and replaced with the
+// result — e.g. "334*3" becomes "1002". Anything that isn't a clean expression (names, notes, etc.)
+// is left completely untouched.
+function evalInlineCalcExpr(raw){
+  const expr = String(raw||'').trim();
+  if(!expr) return null;
+  if(!/^[0-9+\-*/().\s]+$/.test(expr)) return null; // must be ONLY digits/operators/parens/dots/spaces
+  if(!/[+\-*/]/.test(expr)) return null; // must contain at least one operator, else it's just a plain number
+  try{
+    // safe: the regex above already guarantees the string can't contain anything besides digits,
+    // arithmetic operators, parentheses, dots and whitespace, so this can't execute arbitrary code
+    const result = Function('"use strict"; return (' + expr + ');')();
+    if(typeof result !== 'number' || !isFinite(result)) return null;
+    return Math.round(result * 100) / 100; // 2-decimal precision covers both baht amounts and tank counts
+  }catch(e){ return null; }
+}
+document.addEventListener('focusout', e=>{
+  const el = e.target;
+  if(!el || el.tagName !== 'INPUT' || el.type !== 'text' || el.inputMode !== 'decimal') return;
+  const computed = evalInlineCalcExpr(el.value);
+  if(computed !== null) el.value = computed;
+}, true);
+
 /* ---------------- reusable line-item builder: pick ขนาด -> จำนวน -> ยี่ห้อ -> + then edit/remove below ---------------- */
 window._lineBuilders = window._lineBuilders || {};
 function lineItemBuilderHtml(prefix, initialItems){
@@ -4468,7 +4883,7 @@ function lineItemBuilderHtml(prefix, initialItems){
       </div>
       <div class="field" style="flex:1;">
         <label style="font-size:11px;">จำนวน</label>
-        <input type="number" min="1" id="${prefix}_qty" placeholder="0">
+        <input type="text" inputmode="decimal" min="1" id="${prefix}_qty" placeholder="0">
       </div>
       <div class="field" style="flex:1;">
         <label style="font-size:11px;">ยี่ห้อ</label>
@@ -4565,7 +4980,7 @@ function otherProductLineBuilderHtml(prefix, initialItems){
       </div>
       <div class="field" style="flex:1;">
         <label style="font-size:11px;">จำนวน</label>
-        <input type="number" min="1" id="${prefix}_otherQty" placeholder="1" value="1">
+        <input type="text" inputmode="decimal" min="1" id="${prefix}_otherQty" placeholder="1" value="1">
       </div>
       <button type="button" class="btn primary" data-add-other-line="${prefix}" style="margin-bottom:11px;">➕</button>
     </div>
@@ -4833,6 +5248,9 @@ function attachHandlers(){
   document.querySelectorAll('[data-pay-cust]').forEach(b=>b.addEventListener('click', ()=>openPaymentPrompt(b.dataset.payCust)));
   document.querySelectorAll('[data-return-cyl]').forEach(b=>b.addEventListener('click', ()=>openCylinderReturnPrompt(b.dataset.returnCyl)));
   document.querySelectorAll('[data-add-debt]').forEach(b=>b.addEventListener('click', ()=>openAddDebtPrompt(b.dataset.addDebt)));
+  document.querySelectorAll('[data-add-credit]').forEach(b=>b.addEventListener('click', ()=>openAddThaiChuayCreditPrompt(b.dataset.addCredit)));
+  document.querySelectorAll('[data-add-prachanat-credit]').forEach(b=>b.addEventListener('click', ()=>openAddPrachanatCreditPrompt(b.dataset.addPrachanatCredit)));
+  document.querySelectorAll('[data-reconcile-credit]').forEach(b=>b.addEventListener('click', ()=>openReconcileThaiChuayPrompt(b.dataset.reconcileCredit)));
   document.querySelectorAll('[data-reorder-cust]').forEach(b=>b.addEventListener('click', ()=>openSaleForm(b.dataset.reorderCust)));
   document.querySelectorAll('[data-edit-sale]').forEach(b=>b.addEventListener('click', ()=>openSaleForm(undefined, b.dataset.editSale)));
   document.querySelectorAll('[data-bill-sale]').forEach(b=>b.addEventListener('click', ()=>openSaleBillModal(b.dataset.billSale)));
@@ -4859,13 +5277,20 @@ function attachHandlers(){
       persistCustomers(); render();
     });
   }));
-  document.querySelectorAll('[data-toggle-rem]').forEach(b=>b.addEventListener('click', ()=>toggleReminder(b.dataset.toggleRem)));
+  document.querySelectorAll('[data-toggle-rem]').forEach(b=>b.addEventListener('click', ()=>{ toggleReminder(b.dataset.toggleRem); openReminderMenuIds.delete(b.dataset.toggleRem); }));
   document.querySelectorAll('[data-del-rem]').forEach(b=>b.addEventListener('click', ()=>{
     if(confirm('ลบแจ้งเตือนนี้ใช่หรือไม่?')){
       state.reminders = state.reminders.filter(r=>r.id!==b.dataset.delRem);
+      openReminderMenuIds.delete(b.dataset.delRem);
       persistReminders(); render();
     }
   }));
+  document.querySelectorAll('[data-toggle-rem-menu]').forEach(b=>b.addEventListener('click', ()=>{
+    const id = b.dataset.toggleRemMenu;
+    if(openReminderMenuIds.has(id)) openReminderMenuIds.delete(id); else openReminderMenuIds.add(id);
+    render();
+  }));
+  document.querySelectorAll('[data-edit-rem]').forEach(b=>b.addEventListener('click', ()=>openReminderForm(undefined, undefined, b.dataset.editRem)));
 }
 
 /* ---------------- utils ---------------- */
