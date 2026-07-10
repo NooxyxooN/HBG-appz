@@ -455,6 +455,7 @@ let rankSort = 'gas';
 let tasksSort = 'urgency';
 let purchasesSort = 'date';
 let purchasesArchiveOpen = false;
+let pendingCreditListOpen = false;
 let plDetailPeriod = 'month';
 let dashboardPLPeriod = 'month';
 let plDetailSearch = '';
@@ -630,7 +631,7 @@ function openShareModal(){
 function migrateNumericSoiMoo(){
   let custChanged = false;
   state.customers.forEach(c=>{
-    const newSoi = stripToDigits(c.soi);
+    const newSoi = stripSoiChars(c.soi);
     const newMoo = stripToDigits(c.moo);
     if(newSoi !== (c.soi||'')){ c.soi = newSoi; custChanged = true; }
     if(newMoo !== (c.moo||'')){ c.moo = newMoo; custChanged = true; }
@@ -639,7 +640,7 @@ function migrateNumericSoiMoo(){
 
   let taskChanged = false;
   state.tasks.forEach(t=>{
-    const newSoi = stripToDigits(t.soi);
+    const newSoi = stripSoiChars(t.soi);
     const newMoo = stripToDigits(t.moo);
     if(newSoi !== (t.soi||'')){ t.soi = newSoi; taskChanged = true; }
     if(newMoo !== (t.moo||'')){ t.moo = newMoo; taskChanged = true; }
@@ -1158,6 +1159,8 @@ function getSupplierNames(){
 // the supplier-name autocomplete above — instead of making you retype the same soi/moo/landmark
 // for every new person who happens to live in the same area
 function stripToDigits(v){ return (v||'').toString().replace(/[^0-9]/g,''); }
+// ซอยบางที่เขียนแบบ "3/3", "1/3" (ซอยย่อย) — เลยอนุญาตให้มี "/" ปนกับตัวเลขได้ ต่างจากหมู่ที่เป็นตัวเลขล้วน
+function stripSoiChars(v){ return (v||'').toString().replace(/[^0-9/]/g,''); }
 
 function getKnownFieldValues(field){
   const values = new Set();
@@ -1616,20 +1619,24 @@ function renderDashboard(){
         ${Number(c.thaiChuayCredit||0)>0 || Number(c.prachanatCredit||0)>0? `<div class="btnrow" style="margin-top:6px;">${Number(c.thaiChuayCredit||0)>0? `<span class="tag paid">🎫 ฿${fmtMoney(c.thaiChuayCredit)}</span>`:''}${Number(c.prachanatCredit||0)>0? `<span class="tag paid">🪪 ฿${fmtMoney(c.prachanatCredit)}</span>`:''}</div>` : ''}
       </div>`).join('')}
     ` : ''}
-    ${pendingCreditCustomers.length? `
-    <h2 class="section-title">🎫 มีเครดิตค้างใช้ (ไทยช่วยไทย/ประชารัฐ)</h2>
-    ${pendingCreditCustomers.map(c=>`
+    ${pendingCreditCustomers.length? (()=>{
+      const totalThaiChuay = pendingCreditCustomers.reduce((s,c)=>s+Number(c.thaiChuayCredit||0),0);
+      const totalPrachanat = pendingCreditCustomers.reduce((s,c)=>s+Number(c.prachanatCredit||0),0);
+      return `
+    <div class="btnrow" style="margin-bottom:${pendingCreditListOpen?'10px':'14px'};">
+      <button class="btn ${pendingCreditListOpen?'primary':'ghost'} small" id="togglePendingCreditList">🎫 เครดิตค้างใช้ ${pendingCreditCustomers.length} ราย (🎫฿${fmtMoney(totalThaiChuay)} · 🪪฿${fmtMoney(totalPrachanat)}) ${pendingCreditListOpen?'▲':'▼'}</button>
+    </div>
+    ${pendingCreditListOpen? pendingCreditCustomers.map(c=>`
       <div class="card" data-edit-cust="${c.id}" style="cursor:pointer;">
         <div style="display:flex;justify-content:space-between;align-items:center;">
           <div style="font-weight:700;">👤 ${escapeHtml(c.name)}</div>
         </div>
         <div class="btnrow" style="margin-top:4px;">
-          ${Number(c.thaiChuayCredit||0)>0? `<span class="tag paid">🎫 ไทยช่วยไทย ฿${fmtMoney(c.thaiChuayCredit)}</span>`:''}
-          ${Number(c.prachanatCredit||0)>0? `<span class="tag paid">🪪 ประชารัฐ ฿${fmtMoney(c.prachanatCredit)}</span>`:''}
+          ${Number(c.thaiChuayCredit||0)>0? `<span class="tag paid">🎫 ฿${fmtMoney(c.thaiChuayCredit)}</span>`:''}
+          ${Number(c.prachanatCredit||0)>0? `<span class="tag paid">🪪 ฿${fmtMoney(c.prachanatCredit)}</span>`:''}
         </div>
-        <div class="rem-meta" style="margin-top:4px;">อย่าลืมหักเครดิตให้ตอนลูกค้าสั่งแก๊สครั้งหน้า</div>
-      </div>`).join('')}
-    ` : ''}
+      </div>`).join('') : ''}
+    `;})() : ''}
     <h2 class="section-title">แจ้งเตือนใกล้ถึง</h2>
     ${upcoming.length? upcoming.map(renderReminderCard).join('') : '<div class="empty">ยังไม่มีแจ้งเตือน</div>'}
     <h2 class="section-title">ลูกค้าล่าสุด</h2>
@@ -2510,8 +2517,8 @@ function openCustomerForm(id){
       </div>
       <div class="field-row">
         <div class="field">
-          <label>ซอย (ตัวเลขเท่านั้น)</label>
-          <input id="f_soi" list="soiList" inputmode="numeric" pattern="[0-9]*" oninput="this.value=this.value.replace(/[^0-9]/g,'')" value="${c? escapeAttr(stripToDigits(c.soi)):''}" placeholder="เช่น 5" autocomplete="off">
+          <label>ซอย (ตัวเลข หรือ ตัวเลข/ตัวเลข เช่น 3/3)</label>
+          <input id="f_soi" list="soiList" inputmode="numeric" pattern="[0-9/]*" oninput="this.value=this.value.replace(/[^0-9/]/g,'')" value="${c? escapeAttr(stripSoiChars(c.soi)):''}" placeholder="เช่น 5 หรือ 3/3" autocomplete="off">
           <datalist id="soiList">${soiOptions.map(v=>`<option value="${escapeAttr(v)}">`).join('')}</datalist>
         </div>
         <div class="field">
@@ -2587,7 +2594,7 @@ function openCustomerForm(id){
       name: document.getElementById('f_name').value.trim(),
       phone: document.getElementById('f_phone').value.trim(),
       address: document.getElementById('f_address').value.trim(),
-      soi: stripToDigits(document.getElementById('f_soi').value),
+      soi: stripSoiChars(document.getElementById('f_soi').value),
       moo: stripToDigits(document.getElementById('f_moo').value),
       landmark: document.getElementById('f_landmark').value.trim(),
       gasCylindersBreakdown,
@@ -4472,8 +4479,8 @@ function openTaskForm(editId){
         </div>
         <div class="field-row">
           <div class="field">
-            <label>ซอย (ตัวเลขเท่านั้น)</label>
-            <input id="f_taskSoi" list="taskSoiList" inputmode="numeric" pattern="[0-9]*" oninput="this.value=this.value.replace(/[^0-9]/g,'')" value="${editing? escapeAttr(stripToDigits(editing.soi)):''}" placeholder="เช่น 5" autocomplete="off">
+            <label>ซอย (ตัวเลข หรือ ตัวเลข/ตัวเลข เช่น 3/3)</label>
+            <input id="f_taskSoi" list="taskSoiList" inputmode="numeric" pattern="[0-9/]*" oninput="this.value=this.value.replace(/[^0-9/]/g,'')" value="${editing? escapeAttr(stripSoiChars(editing.soi)):''}" placeholder="เช่น 5 หรือ 3/3" autocomplete="off">
             <datalist id="taskSoiList">${soiOptions.map(v=>`<option value="${escapeAttr(v)}">`).join('')}</datalist>
           </div>
           <div class="field">
@@ -4610,7 +4617,7 @@ function openTaskForm(editId){
       customName: customerId? null : typedName,
       phone: customerId? '' : document.getElementById('f_taskPhone').value.trim(),
       address: customerId? '' : document.getElementById('f_taskAddress').value.trim(),
-      soi: customerId? '' : stripToDigits(document.getElementById('f_taskSoi').value),
+      soi: customerId? '' : stripSoiChars(document.getElementById('f_taskSoi').value),
       moo: customerId? '' : stripToDigits(document.getElementById('f_taskMoo').value),
       landmark: customerId? '' : document.getElementById('f_taskLandmark').value.trim(),
       urgencyMode: document.getElementById('f_taskUrgencyMode').value,
@@ -5261,6 +5268,8 @@ function attachHandlers(){
   }));
   const togglePurchaseArchive = document.getElementById('togglePurchaseArchive');
   if(togglePurchaseArchive) togglePurchaseArchive.addEventListener('click', ()=>{ purchasesArchiveOpen = !purchasesArchiveOpen; render(); });
+  const togglePendingCreditList = document.getElementById('togglePendingCreditList');
+  if(togglePendingCreditList) togglePendingCreditList.addEventListener('click', ()=>{ pendingCreditListOpen = !pendingCreditListOpen; render(); });
   document.querySelectorAll('[data-restore-purchase]').forEach(b=>b.addEventListener('click', ()=>{
     const p = state.purchases.find(x=>x.id===b.dataset.restorePurchase);
     if(p){ p.archived = false; persistPurchases(); render(); }
