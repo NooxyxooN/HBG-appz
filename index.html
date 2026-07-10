@@ -2452,7 +2452,7 @@ function renderCustomerCard(c, opts){
       ${Number(c.gasCylinders||0)>0? `<span class="tag gas">${gasBrandIconsHtml(c.gasCylindersBreakdown, 16) || '🛢️'} ยืมถัง ${c.gasCylinders} ใบ</span>`:''}
       ${Number(c.debt||0)>0? `<span class="tag debt">ค้างชำระ ฿${fmtMoney(c.debt)}</span>` : `<span class="tag paid">ไม่มีหนี้</span>`}
       ${Number(c.thaiChuayCredit||0)>0? `<span class="tag paid">🎫 เครดิตไทยช่วยไทย ฿${fmtMoney(c.thaiChuayCredit)}${(c.thaiChuayCreditLog||[]).length? ` (กด ${c.thaiChuayCreditLog.reduce((a,l)=>a+Number(l.times||1),0)} ครั้ง รวม ฿${fmtMoney(c.thaiChuayCreditLog.reduce((a,l)=>a+Number(l.amount||0),0))})` : ''}</span>` : ''}
-      ${Number(c.prachanatCredit||0)>0? `<span class="tag paid">🪪 เครดิตประชารัฐ ฿${fmtMoney(c.prachanatCredit)}</span>` : ''}
+      ${Number(c.prachanatCredit||0)>0? `<span class="tag paid">🪪 เครดิตประชารัฐ ฿${fmtMoney(c.prachanatCredit)}${(c.prachanatCreditLog||[]).length? ` (กด ${c.prachanatCreditLog.reduce((a,l)=>a+Number(l.times||1),0)} ครั้ง รวม ฿${fmtMoney(c.prachanatCreditLog.reduce((a,l)=>a+Number(l.amount||0),0))})` : ''}</span>` : ''}
     </div>
     ${c.notes? `<div class="rem-meta" style="margin-top:8px;">📝 ${escapeHtml(c.notes)}</div>`:''}
     <div class="btnrow">
@@ -2463,6 +2463,7 @@ function renderCustomerCard(c, opts){
       <button class="btn ghost small" data-add-prachanat-credit="${c.id}">🪪 เครดิตประชารัฐ</button>
       ${Number(c.debt||0)>0 && Number(c.thaiChuayCredit||0)>0? `<button class="btn ghost small" style="background:var(--green-bg);" data-reconcile-credit="${c.id}">⚖️ หักหนี้ด้วยเครดิต</button>` : ''}
       <button class="btn ghost small" data-reorder-cust="${c.id}">➕ สั่งอีกรอบ</button>
+      ${opts.showInvoiceBtn && Number(c.debt||0)>0? `<button class="btn ghost small" data-bill-debtor="${c.id}">🧾 ใบแจ้งหนี้</button>` : ''}
       ${opts.showClearAll? `<button class="btn primary small" style="background:var(--green);" data-clear-all-cust="${c.id}">✅ เคลียร์ครบ</button>` : ''}
     </div>
     <div class="btnrow">
@@ -2624,6 +2625,15 @@ function openPaymentPrompt(id){
         <div id="amountError" class="rem-meta" style="color:var(--red);display:none;margin-top:4px;">กรุณากรอกจำนวนเงินมากกว่า 0</div>
         <button type="button" class="btn ghost small" id="fullAmountBtn" style="margin-top:6px;">💯 จ่ายเต็มจำนวน (฿${fmtMoney(c.debt||0)})</button>
       </div>
+      <div class="field">
+        <label style="display:flex;align-items:center;gap:8px;font-weight:400;"><input type="checkbox" id="f_usePrachanat" style="width:auto;"> 🪪 จ่ายด้วยบัตรประชารัฐ (กดตอนนี้เลย ไม่ได้กดล่วงหน้า)</label>
+        <div id="prachanatPayBox" style="display:none;margin-top:8px;">
+          <label>จำนวนบัตร</label>
+          <input type="text" inputmode="decimal" id="f_prachanatCards" value="1">
+          <div class="rem-meta" style="margin-top:4px;">ราคารวม ฿<span id="prachanatPayTotal">80</span> — กดปุ่มด้านล่างเพื่อใส่ยอดนี้ลงช่องจำนวนเงินด้านบน</div>
+          <button type="button" class="btn ghost small" id="usePrachanatTotalBtn" style="margin-top:6px;">ใช้ยอดนี้</button>
+        </div>
+      </div>
       <div class="btnrow">
         <button type="submit" class="btn primary">บันทึกการชำระเงิน</button>
         <button type="button" class="btn ghost" id="cancelModal">ยกเลิก</button>
@@ -2634,6 +2644,23 @@ function openPaymentPrompt(id){
   document.getElementById('fullAmountBtn').addEventListener('click', ()=>{
     document.getElementById('f_amount').value = Number(c.debt||0);
   });
+  const prachanatCheckbox = document.getElementById('f_usePrachanat');
+  const prachanatBox = document.getElementById('prachanatPayBox');
+  const prachanatCardsInput = document.getElementById('f_prachanatCards');
+  const prachanatTotalEl = document.getElementById('prachanatPayTotal');
+  function updatePrachanatTotal(){
+    const cards = Math.max(1, Number(prachanatCardsInput.value)||1);
+    prachanatTotalEl.textContent = fmtMoney(cards*80);
+  }
+  prachanatCheckbox.addEventListener('change', ()=>{
+    prachanatBox.style.display = prachanatCheckbox.checked? 'block' : 'none';
+    updatePrachanatTotal();
+  });
+  prachanatCardsInput.addEventListener('input', updatePrachanatTotal);
+  document.getElementById('usePrachanatTotalBtn').addEventListener('click', ()=>{
+    const cards = Math.max(1, Number(prachanatCardsInput.value)||1);
+    document.getElementById('f_amount').value = cards*80;
+  });
   document.getElementById('payForm').addEventListener('submit', e=>{
     e.preventDefault();
     const amt = Number(document.getElementById('f_amount').value)||0;
@@ -2642,12 +2669,24 @@ function openPaymentPrompt(id){
       document.getElementById('f_amount').focus();
       return;
     }
+    const usePrachanat = prachanatCheckbox.checked;
+    const prachanatCards = usePrachanat? Math.max(1, Number(prachanatCardsInput.value)||1) : 0;
     adjustCustomerRemote(c.id, fresh=>{
       const updated = cloneCustomerForEdit(fresh);
       updated.debt = Math.max(0, Number(updated.debt||0) - amt);
+      // paid via ประชารัฐ card RIGHT NOW (not pre-tapped credit) — just append to the tap-count
+      // history for audit purposes; the money itself is booked as a normal debt payment below, so
+      // this does NOT touch the spendable prachanatCredit balance (nothing was banked in advance)
+      if(usePrachanat){
+        updated.prachanatCreditLog = [...(updated.prachanatCreditLog||[]), { id: uid(), date: todayISO(), amount: prachanatCards*80, times: prachanatCards, note: 'จ่ายหนี้ด้วยบัตรประชารัฐ' }];
+      }
       return updated;
     }).then(()=>render());
-    state.sales.push({id:uid(), date:todayISO(), amount:amt, customerId:c.id, note:'รับชำระหนี้', createdAt: Date.now()});
+    state.sales.push({
+      id:uid(), date:todayISO(), amount:amt, customerId:c.id,
+      note: usePrachanat? `รับชำระหนี้ (บัตรประชารัฐ x${prachanatCards})` : 'รับชำระหนี้',
+      createdAt: Date.now()
+    });
     persistSales();
     closeModal();
     render();
@@ -2865,7 +2904,7 @@ function openReconcileThaiChuayPrompt(id){
   });
 }
 
-function buildPrachanatCouponHtml(custName, amount, cards, note){
+function buildPrachanatCouponHtml(custName, amount, cards, note, staffName){
   const dateStr = new Date().toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'numeric'});
   const timeStr = new Date().toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
   return `<div style="font-family:'Sarabun',sans-serif;font-size:2.2em;text-align:center;">
@@ -2875,6 +2914,7 @@ function buildPrachanatCouponHtml(custName, amount, cards, note){
     <div style="text-align:left;"><b>ลูกค้า:</b> ${escapeHtml(custName)}</div>
     <div style="text-align:left;margin-top:6px;"><b>จำนวนบัตรที่กด:</b> ${cards} ใบ</div>
     ${note? `<div style="text-align:left;margin-top:6px;"><b>หมายเหตุ:</b> ${escapeHtml(note)}</div>` : ''}
+    ${staffName? `<div style="text-align:left;margin-top:6px;"><b>คนออกบัตร:</b> ${escapeHtml(staffName)}</div>` : ''}
     <div style="border-top:2px dashed #000;margin:14px 0;"></div>
     <div style="font-weight:bold;font-size:1.4em;">เครดิตสะสม ฿${fmtMoney(amount)}</div>
     <div style="border-top:3px solid #000;margin:14px 0;"></div>
@@ -2885,12 +2925,15 @@ function buildPrachanatCouponHtml(custName, amount, cards, note){
 function openAddPrachanatCreditPrompt(id){
   const c = state.customers.find(x=>x.id===id);
   if(!c) return;
+  const rememberedStaff = localStorage.getItem('prachanatStaffName') || (SHOP_INFO.staff[0] && SHOP_INFO.staff[0].name) || '';
   const body = `
     <h3>🪪 เพิ่มเครดิตบัตรประชารัฐ — ${escapeHtml(c.name)}</h3>
     <div class="rem-meta" style="margin-bottom:10px;line-height:1.6;">ใช้ตอนลูกค้ากดสิทธิ์บัตรสวัสดิการแห่งรัฐ (฿80/ใบ กดได้หลายใบถ้ามีหลายบัตร) ไว้ล่วงหน้าโดยยังไม่มาเอาแก๊สจริง เงินจะถือว่าเข้าร้านแล้วตอนนี้เลย (นับเป็นรายรับทันที) แล้วเก็บเป็นเครดิตไว้หักตอนลูกค้ามาเอาแก๊สจริง — พิมพ์คูปองไว้เป็นหลักฐานกันลืมได้</div>
     <form class="panel" id="addPrachanatCreditForm" novalidate>
       <div class="field"><label>เครดิตคงเหลือปัจจุบัน</label>
         <div class="mono" style="font-size:18px;color:var(--green);">฿${fmtMoney(c.prachanatCredit||0)}</div>
+        ${(c.prachanatCreditLog||[]).length? `<div class="rem-meta" style="margin-top:4px;">ประวัติกดสะสม: ${c.prachanatCreditLog.reduce((a,l)=>a+Number(l.times||1),0)} ครั้ง รวม ฿${fmtMoney(c.prachanatCreditLog.reduce((a,l)=>a+Number(l.amount||0),0))}</div>` : ''}
+        ${Number(c.prachanatCredit||0)>0? `<button type="button" class="btn ghost small" id="reprintPrachanatCouponBtn" style="margin-top:6px;">🖨️ พิมพ์คูปองยอดคงเหลือตอนนี้</button>` : ''}
       </div>
       <div class="field">
         <label>จำนวนบัตรที่กดวันนี้ (ใบ)</label>
@@ -2900,6 +2943,11 @@ function openAddPrachanatCreditPrompt(id){
         <label>จำนวนเงินรวม (บาท) *</label>
         <input type="text" inputmode="decimal" min="0" step="1" id="f_prachanatAmount" value="80">
         <div id="prachanatAmountError" class="rem-meta" style="color:var(--red);display:none;margin-top:4px;">กรุณากรอกจำนวนเงินมากกว่า 0</div>
+      </div>
+      <div class="field">
+        <label>คนออกบัตร (ผู้รับผิดชอบ)</label>
+        <div class="btnrow">${SHOP_INFO.staff.map(p=>`<button type="button" class="btn ${p.name===rememberedStaff?'primary':'ghost'} small" data-pick-prachanat-staff="${escapeAttr(p.name)}">${escapeHtml(p.name)}</button>`).join('')}</div>
+        <input type="hidden" id="f_prachanatStaff" value="${escapeAttr(rememberedStaff)}">
       </div>
       <div class="field"><label>หมายเหตุ</label><input id="f_prachanatNote" placeholder="เช่น กดบัตรประชารัฐล่วงหน้า"></div>
       <div class="btnrow">
@@ -2915,6 +2963,19 @@ function openAddPrachanatCreditPrompt(id){
     const n = Number(cardsInput.value)||0;
     if(n>0) amountInput.value = n*80;
   });
+  document.querySelectorAll('[data-pick-prachanat-staff]').forEach(b=>b.addEventListener('click', ()=>{
+    document.getElementById('f_prachanatStaff').value = b.dataset.pickPrachanatStaff;
+    document.querySelectorAll('[data-pick-prachanat-staff]').forEach(x=>x.classList.toggle('primary', x===b));
+    document.querySelectorAll('[data-pick-prachanat-staff]').forEach(x=>x.classList.toggle('ghost', x!==b));
+  }));
+  // reprints/prints a coupon for the credit already banked on this customer (no new top-up) — handy
+  // when the original coupon was lost, or credit was added before this print feature existed
+  const reprintBtn = document.getElementById('reprintPrachanatCouponBtn');
+  if(reprintBtn) reprintBtn.addEventListener('click', ()=>{
+    const totalTimes = (c.prachanatCreditLog||[]).reduce((a,l)=>a+Number(l.times||1),0);
+    const staffName = document.getElementById('f_prachanatStaff').value;
+    exportReceiptImage(`คูปองประชารัฐ_${c.name}`, buildPrachanatCouponHtml(c.name, Number(c.prachanatCredit||0), totalTimes || 1, 'สรุปยอดเครดิตคงเหลือ (พิมพ์ซ้ำ)', staffName), 420);
+  });
   document.getElementById('addPrachanatCreditForm').addEventListener('submit', e=>{
     e.preventDefault();
     const amt = Number(amountInput.value)||0;
@@ -2925,9 +2986,14 @@ function openAddPrachanatCreditPrompt(id){
     }
     const cards = Number(cardsInput.value)||1;
     const note = document.getElementById('f_prachanatNote').value.trim();
+    const staffName = document.getElementById('f_prachanatStaff').value;
+    if(staffName) localStorage.setItem('prachanatStaffName', staffName);
     adjustCustomerRemote(c.id, fresh=>{
       const updated = cloneCustomerForEdit(fresh);
       updated.prachanatCredit = Number(updated.prachanatCredit||0) + amt;
+      // running tap-by-tap log, same idea as thaiChuayCreditLog — survives redemption so the shop
+      // can always see total taps/amount even after some of the balance above has been spent
+      updated.prachanatCreditLog = [...(updated.prachanatCreditLog||[]), { id: uid(), date: todayISO(), amount: amt, times: cards, note, staffName }];
       return updated;
     }).then(()=>render());
     state.transactions.push({
@@ -2940,7 +3006,7 @@ function openAddPrachanatCreditPrompt(id){
     persistTransactions();
     closeModal();
     render();
-    exportReceiptImage(`คูปองประชารัฐ_${c.name}`, buildPrachanatCouponHtml(c.name, amt, cards, note), 420);
+    exportReceiptImage(`คูปองประชารัฐ_${c.name}`, buildPrachanatCouponHtml(c.name, amt, cards, note, staffName), 420);
   });
 }
 
@@ -3845,6 +3911,27 @@ function openTaskBillModal(taskId){
   const btn = document.querySelector(`[data-bill-task="${taskId}"]`);
   generateAndShareBill(t, 'task', btn);
 }
+// prints/shares an invoice for a customer's outstanding money debt from the Debtors tab — reuses the
+// same generateAndShareBill pipeline as Sales/Tasks bills, just built from a synthetic record instead
+// of a real sale/task. Deliberately leaves gasBreakdown empty (falls back to a single "ยอดค้างชำระ"
+// line item) since borrowed cylinders and cash debt are separate ledgers that shouldn't be implied
+// to have a per-unit price together.
+function openDebtorBillModal(customerId){
+  const c = state.customers.find(x=>x.id===customerId);
+  if(!c){ showSaveError('ไม่พบลูกค้ารายนี้'); return; }
+  if(Number(c.debt||0)<=0){ showSaveError('ลูกค้ารายนี้ไม่มียอดค้างชำระเป็นเงิน'); return; }
+  const gasNote = Number(c.gasCylinders||0)>0 ? ` (ยังมีถังค้างคืนอีก ${c.gasCylinders} ใบ แยกจากยอดนี้)` : '';
+  const record = {
+    customerId: c.id,
+    date: todayISO(),
+    amount: Number(c.debt||0),
+    gasBreakdown: [],
+    otherItems: [],
+    note: 'ยอดค้างชำระสะสม' + gasNote
+  };
+  const btn = document.querySelector(`[data-bill-debtor="${customerId}"]`);
+  generateAndShareBill(record, 'sale', btn);
+}
 
 // tappable summary at the top of the Tasks tab: shows total customers + tanks to load today,
 // and this modal breaks the tank total down by both brand and size (kg) so it's clear exactly
@@ -4148,7 +4235,7 @@ function renderDebtorRow(c){
         <span style="color:var(--ink-soft);">${isExpanded?'▲':'▼'}</span>
       </div>
     </div>
-    ${isExpanded? `<div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:10px;">${renderCustomerCard(c, {showClearAll:true})}</div>` : ''}
+    ${isExpanded? `<div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:10px;">${renderCustomerCard(c, {showClearAll:true, showInvoiceBtn:true})}</div>` : ''}
   </div>`;
 }
 
@@ -4314,16 +4401,18 @@ function renderTasks(){
     const navLink = mapsUrl(address);
     const urgencyState = getTaskUrgencyState(t);
     const startedAt = t.timerStartAt || Date.parse(t.createdAt) || Date.now();
+    const truckShortfall = t.gasBreakdown? getTruckStockShortfall(t.gasBreakdown) : [];
     return `
     <div class="card rem-card">
       <div class="checkbox" data-complete-task="${t.id}" style="cursor:pointer;"></div>
       <div style="flex:1;">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
-          <div class="rem-title"><span data-set-urgency="${t.id}" style="cursor:pointer;padding:2px 4px;margin:-2px -4px;border-radius:6px;" title="แตะเพื่อเปลี่ยนสถานะ">${getTaskUrgencyIcon(urgencyState)}</span> ${escapeHtml(displayName)}</div>
+          <div class="rem-title"><span data-set-urgency="${t.id}" style="cursor:pointer;padding:2px 4px;margin:-2px -4px;border-radius:6px;" title="แตะเพื่อเปลี่ยนสถานะ">${getTaskUrgencyIcon(urgencyState)}</span> ${escapeHtml(displayName)}${truckShortfall.length? ` <span title="ถังในรถไม่พอสำหรับลูกค้านี้">⚠️</span>` : ''}</div>
           ${navLink? `<a class="btn ghost small" href="${navLink}" target="_blank" rel="noopener" style="text-decoration:none;flex-shrink:0;">🧭 นำทาง</a>` : ''}
         </div>
         <div class="rem-meta">${getTaskUrgencyLabel(urgencyState)} · ${formatElapsed(startedAt)}</div>
         ${t.gasBreakdown && sumGasBreakdown(t.gasBreakdown)>0? `<div class="rem-meta">${gasBrandIconsHtml(t.gasBreakdown, 16) || '🛢️'} ${gasBreakdownSummary(t.gasBreakdown)}</div>` : ''}
+        ${truckShortfall.length? `<div class="rem-meta" style="color:var(--red);font-weight:600;">⚠️ ถังในรถไม่พอ: ${truckShortfall.map(s=>`${GAS_BRAND_LABELS[s.brand]} ${s.size}kg ขาด ${s.need-s.have} (มี ${s.have}/${s.need})`).join(', ')}</div>` : ''}
         ${t.otherItems && t.otherItems.length? `<div class="rem-meta">🧰 ${otherItemsSummary(t.otherItems)}</div>` : ''}
         ${phone? `<div class="rem-meta">📞 <a href="tel:${escapeAttr(phone)}" style="color:var(--orange-dark);font-weight:600;">${escapeHtml(phone)}</a></div>` : ''}
         ${t.note? `<div class="rem-meta">📝 ${escapeHtml(t.note)}</div>` : ''}
@@ -5255,6 +5344,7 @@ function attachHandlers(){
   document.querySelectorAll('[data-edit-sale]').forEach(b=>b.addEventListener('click', ()=>openSaleForm(undefined, b.dataset.editSale)));
   document.querySelectorAll('[data-bill-sale]').forEach(b=>b.addEventListener('click', ()=>openSaleBillModal(b.dataset.billSale)));
   document.querySelectorAll('[data-bill-task]').forEach(b=>b.addEventListener('click', ()=>openTaskBillModal(b.dataset.billTask)));
+  document.querySelectorAll('[data-bill-debtor]').forEach(b=>b.addEventListener('click', ()=>openDebtorBillModal(b.dataset.billDebtor)));
   document.querySelectorAll('[data-toggle-history]').forEach(b=>b.addEventListener('click', ()=>{
     const id = b.dataset.toggleHistory;
     if(expandedHistoryIds.has(id)) expandedHistoryIds.delete(id); else expandedHistoryIds.add(id);
