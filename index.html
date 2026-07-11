@@ -3385,8 +3385,7 @@ function openSaleForm(presetCustomerId, editId){
     else {
       state.sales.push({ id:uid(), ...data, createdAt: Date.now() });
       applyDeliveryToInventory(data.gasBreakdown, data.cylinderPending);
-      // ลูกค้าหน้าร้าน (pickup) มารับถังที่ร้านเองโดยตรง ไม่ได้ผ่านรถส่งของ — ไม่ควรหักถังในรถ
-      if(!data.pickup) applyDeliveryToTruckStock(data.gasBreakdown, data.cylinderPending);
+      // ถังบนรถ (truck stock) อ้างอิงเฉพาะหน้างานส่งเท่านั้น — การบันทึกยอดขายที่หน้านี้ไม่กระทบถังบนรถ
       if(customerId){
         adjustCustomerRemote(customerId, fresh=>{
           const updated = cloneCustomerForEdit(fresh);
@@ -4124,10 +4123,14 @@ function renderTruckStockRows(){
         ${iconImgHtml(tankIconSrc(i.brand, i.size), 28)}
         <div style="font-weight:600;">${i.size} kg (${GAS_BRAND_LABELS[i.brand]})</div>
       </div>
-      <div style="display:flex;gap:8px;">
+      <div style="display:flex;gap:8px;align-items:center;">
         <div style="flex:1;display:flex;justify-content:space-between;align-items:center;background:var(--paper);border-radius:6px;padding:4px 8px;">
           <span>เต็ม ${i.full||0}</span>
           <button type="button" class="btn ghost small" data-truck-dec="${i.size}_${i.brand}_full" ${!(i.full>0)?'disabled':''}>－</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:2px;">
+          <button type="button" class="btn ghost small" title="ย้ายจากเปล่า ไปเต็ม" data-truck-move="${i.size}_${i.brand}_toFull" ${!(i.empty>0)?'disabled':''}>◀</button>
+          <button type="button" class="btn ghost small" title="ย้ายจากเต็ม ไปเปล่า" data-truck-move="${i.size}_${i.brand}_toEmpty" ${!(i.full>0)?'disabled':''}>▶</button>
         </div>
         <div style="flex:1;display:flex;justify-content:space-between;align-items:center;background:var(--paper);border-radius:6px;padding:4px 8px;">
           <span style="color:var(--ink-soft);">เปล่า ${i.empty||0}</span>
@@ -4228,15 +4231,38 @@ function openTruckStockModal(){
   });
   document.getElementById('truckStockRows').addEventListener('click', e=>{
     const decBtn = e.target.closest('[data-truck-dec]');
-    if(!decBtn) return;
-    const [size, brand, kind] = decBtn.dataset.truckDec.split('_');
-    const entry = state.truckStock.find(l=>l.size===size && l.brand===brand);
-    if(entry && Number(entry[kind]||0)>0){
-      entry[kind] -= 1;
-      if((Number(entry.full||0)<=0) && (Number(entry.empty||0)<=0)) state.truckStock = state.truckStock.filter(l=>!(l.size===size && l.brand===brand));
-      persistTruckStock();
-      refreshTruckStockModal();
-      render();
+    if(decBtn){
+      const [size, brand, kind] = decBtn.dataset.truckDec.split('_');
+      const entry = state.truckStock.find(l=>l.size===size && l.brand===brand);
+      if(entry && Number(entry[kind]||0)>0){
+        entry[kind] -= 1;
+        if((Number(entry.full||0)<=0) && (Number(entry.empty||0)<=0)) state.truckStock = state.truckStock.filter(l=>!(l.size===size && l.brand===brand));
+        persistTruckStock();
+        refreshTruckStockModal();
+        render();
+      }
+      return;
+    }
+    // ◀▶ ย้ายถังทีละใบข้ามฟาก เต็ม<->เปล่า — เช่น เอาถังเปล่าที่เพิ่งได้คืนจากลูกค้ามาเติมลมใหม่กลายเป็นเต็ม
+    // หรือถังเต็มที่ส่งไปแล้วแต่ลืมกดส่งเสร็จ ให้ย้ายเป็นเปล่าเอง โดยไม่ต้องกดลบ/เพิ่มทีละใบ
+    const moveBtn = e.target.closest('[data-truck-move]');
+    if(moveBtn){
+      const [size, brand, dir] = moveBtn.dataset.truckMove.split('_');
+      const entry = state.truckStock.find(l=>l.size===size && l.brand===brand);
+      if(entry){
+        if(dir==='toFull' && Number(entry.empty||0)>0){
+          entry.empty -= 1;
+          entry.full = Number(entry.full||0) + 1;
+        } else if(dir==='toEmpty' && Number(entry.full||0)>0){
+          entry.full -= 1;
+          entry.empty = Number(entry.empty||0) + 1;
+        } else {
+          return;
+        }
+        persistTruckStock();
+        refreshTruckStockModal();
+        render();
+      }
     }
   });
 }
