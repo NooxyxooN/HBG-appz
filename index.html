@@ -3183,6 +3183,25 @@ function openSaleForm(presetCustomerId, editId){
       </div>
       <div id="saleCreditBox"></div>
       <div id="salePrachanatCreditBox"></div>
+      <div class="field" style="margin-top:6px;padding-top:10px;border-top:1px dashed var(--border);">
+        <label style="display:flex;align-items:center;gap:8px;font-weight:400;"><input type="checkbox" id="f_tapPrachanatNow" style="width:auto;"> 🪪 ลูกค้ากดบัตรประชารัฐจ่ายตอนนี้เลย (ยังไม่เคยกดล่วงหน้า)</label>
+        <div id="saleTapPrachanatBox" style="display:none;margin-top:8px;">
+          <label>จำนวนบัตร</label>
+          <input type="text" inputmode="decimal" min="1" step="1" id="f_tapPrachanatCards" value="1">
+          <div class="rem-meta" style="margin-top:4px;">ราคารวม ฿<span id="saleTapPrachanatTotal">80</span></div>
+          <button type="button" class="btn ghost small" id="saleUseTapPrachanatBtn" style="margin-top:6px;">➕ ใส่ยอดนี้ในช่องจำนวนเงิน</button>
+        </div>
+      </div>
+      <div class="field">
+        <label style="display:flex;align-items:center;gap:8px;font-weight:400;"><input type="checkbox" id="f_tapThaiChuayNow" style="width:auto;"> 🎫 ลูกค้ากดสิทธิ์ไทยช่วยไทยจ่ายตอนนี้เลย (ยังไม่เคยกดล่วงหน้า)</label>
+        <div id="saleTapThaiChuayBox" style="display:none;margin-top:8px;">
+          <label>จำนวนเงิน (สูงสุด 334 บาท/ครั้ง)</label>
+          <div class="btnrow">${[1,2,3,4,5].map(n=>`<button type="button" class="btn ghost small" data-sale-tap-times="${n}">×${n}</button>`).join('')}</div>
+          <input type="text" inputmode="decimal" min="0" step="1" id="f_tapThaiChuayAmount" value="334" style="margin-top:6px;">
+          <input type="hidden" id="f_tapThaiChuayTimes" value="1">
+          <button type="button" class="btn ghost small" id="saleUseTapThaiChuayBtn" style="margin-top:6px;">➕ ใส่ยอดนี้ในช่องจำนวนเงิน</button>
+        </div>
+      </div>
       <div class="field"><label>รายละเอียด</label><input id="f_note" placeholder="เช่น ถังแก๊ส 15 กก." value="${editing? escapeAttr(editing.note||'') : ''}"></div>
       <div class="field">
         <label style="display:flex;align-items:center;gap:8px;font-weight:400;"><input type="checkbox" id="f_unpaid" style="width:auto;" ${editing && editing.unpaid?'checked':''}> ค้างจ่ายเงิน</label>
@@ -3233,6 +3252,43 @@ function openSaleForm(presetCustomerId, editId){
     </div>`;
   }
   renderSalePrachanatCreditBox(initialCustomerId);
+
+  // "กดตอนนี้เลย" taps — customer pays for THIS sale using a benefit they tap on the spot, as
+  // opposed to redeeming a balance banked in advance (see renderSaleCreditBox above). The amount
+  // is already counted normally via f_amount (like cash), so this only appends an audit-log entry
+  // on submit — it must NOT touch the spendable credit balance or creditApplied/prachanatCreditApplied
+  // (that would double-subtract revenue that was never separately recorded as income).
+  const tapPrachanatCheckbox = document.getElementById('f_tapPrachanatNow');
+  const tapPrachanatBox = document.getElementById('saleTapPrachanatBox');
+  const tapPrachanatCardsInput = document.getElementById('f_tapPrachanatCards');
+  const tapPrachanatTotalEl = document.getElementById('saleTapPrachanatTotal');
+  function updateSaleTapPrachanatTotal(){
+    const cards = Math.max(1, Number(tapPrachanatCardsInput.value)||1);
+    tapPrachanatTotalEl.textContent = fmtMoney(cards*80);
+  }
+  tapPrachanatCheckbox.addEventListener('change', ()=>{
+    tapPrachanatBox.style.display = tapPrachanatCheckbox.checked? 'block' : 'none';
+    updateSaleTapPrachanatTotal();
+  });
+  tapPrachanatCardsInput.addEventListener('input', updateSaleTapPrachanatTotal);
+  document.getElementById('saleUseTapPrachanatBtn').addEventListener('click', ()=>{
+    const cards = Math.max(1, Number(tapPrachanatCardsInput.value)||1);
+    document.getElementById('f_amount').value = cards*80;
+  });
+
+  const tapThaiChuayCheckbox = document.getElementById('f_tapThaiChuayNow');
+  const tapThaiChuayBox = document.getElementById('saleTapThaiChuayBox');
+  tapThaiChuayCheckbox.addEventListener('change', ()=>{
+    tapThaiChuayBox.style.display = tapThaiChuayCheckbox.checked? 'block' : 'none';
+  });
+  document.querySelectorAll('[data-sale-tap-times]').forEach(b=>b.addEventListener('click', ()=>{
+    const n = Number(b.dataset.saleTapTimes)||1;
+    document.getElementById('f_tapThaiChuayAmount').value = 334 * n;
+    document.getElementById('f_tapThaiChuayTimes').value = n;
+  }));
+  document.getElementById('saleUseTapThaiChuayBtn').addEventListener('click', ()=>{
+    document.getElementById('f_amount').value = Number(document.getElementById('f_tapThaiChuayAmount').value)||0;
+  });
 
   const custSearchInput = document.getElementById('f_saleCustSearch');
   const custSuggestBox = document.getElementById('saleCustSuggestions');
@@ -3306,6 +3362,11 @@ function openSaleForm(presetCustomerId, editId){
     const prachanatCreditInput = document.getElementById('f_prachanatCreditApplied');
     const availablePrachanatCredit = custForCredit? Number(custForCredit.prachanatCredit||0) : 0;
     const prachanatCreditApplied = prachanatCreditInput ? Math.max(0, Math.min(Number(prachanatCreditInput.value)||0, availablePrachanatCredit, Math.max(0, amt - creditApplied))) : 0;
+    const tapPrachanatNow = document.getElementById('f_tapPrachanatNow').checked;
+    const tapPrachanatCards = tapPrachanatNow? Math.max(1, Number(document.getElementById('f_tapPrachanatCards').value)||1) : 0;
+    const tapThaiChuayNow = document.getElementById('f_tapThaiChuayNow').checked;
+    const tapThaiChuayAmount = tapThaiChuayNow? (Number(document.getElementById('f_tapThaiChuayAmount').value)||0) : 0;
+    const tapThaiChuayTimes = tapThaiChuayNow? Math.max(1, Number(document.getElementById('f_tapThaiChuayTimes').value)||1) : 0;
     const data = {
       date: document.getElementById('f_date').value || todayISO(),
       amount: amt,
@@ -3333,6 +3394,8 @@ function openSaleForm(presetCustomerId, editId){
           if(data.unpaid && residual>0) updated.debt = Number(updated.debt||0) + residual;
           if(creditApplied>0) updated.thaiChuayCredit = Math.max(0, Number(updated.thaiChuayCredit||0) - creditApplied);
           if(prachanatCreditApplied>0) updated.prachanatCredit = Math.max(0, Number(updated.prachanatCredit||0) - prachanatCreditApplied);
+          if(tapPrachanatNow) updated.prachanatCreditLog = [...(updated.prachanatCreditLog||[]), { id: uid(), date: todayISO(), amount: tapPrachanatCards*80, times: tapPrachanatCards, note: 'จ่ายด้วยบัตรประชารัฐตอนนี้เลย (ซื้อแก๊ส)' }];
+          if(tapThaiChuayNow) updated.thaiChuayCreditLog = [...(updated.thaiChuayCreditLog||[]), { id: uid(), date: todayISO(), amount: tapThaiChuayAmount, times: tapThaiChuayTimes, note: 'จ่ายด้วยไทยช่วยไทยตอนนี้เลย (ซื้อแก๊ส)' }];
           if(data.cylinderPending && data.gasQty>0) addToCustomerGasBreakdown(updated, breakdownToLineItems(breakdown));
           return updated;
         }).then(()=>render());
@@ -4654,6 +4717,25 @@ function openTaskCompleteForm(taskId){
       </div>
       <div id="taskCompleteCreditBox"></div>
       <div id="taskCompletePrachanatCreditBox"></div>
+      <div class="field" style="margin-top:6px;padding-top:10px;border-top:1px dashed var(--border);">
+        <label style="display:flex;align-items:center;gap:8px;font-weight:400;"><input type="checkbox" id="f_tapPrachanatNow" style="width:auto;"> 🪪 ลูกค้ากดบัตรประชารัฐจ่ายตอนนี้เลย (ยังไม่เคยกดล่วงหน้า)</label>
+        <div id="taskCompleteTapPrachanatBox" style="display:none;margin-top:8px;">
+          <label>จำนวนบัตร</label>
+          <input type="text" inputmode="decimal" min="1" step="1" id="f_tapPrachanatCards" value="1">
+          <div class="rem-meta" style="margin-top:4px;">ราคารวม ฿<span id="taskCompleteTapPrachanatTotal">80</span></div>
+          <button type="button" class="btn ghost small" id="taskCompleteUseTapPrachanatBtn" style="margin-top:6px;">➕ ใส่ยอดนี้ในช่องจำนวนเงิน</button>
+        </div>
+      </div>
+      <div class="field">
+        <label style="display:flex;align-items:center;gap:8px;font-weight:400;"><input type="checkbox" id="f_tapThaiChuayNow" style="width:auto;"> 🎫 ลูกค้ากดสิทธิ์ไทยช่วยไทยจ่ายตอนนี้เลย (ยังไม่เคยกดล่วงหน้า)</label>
+        <div id="taskCompleteTapThaiChuayBox" style="display:none;margin-top:8px;">
+          <label>จำนวนเงิน (สูงสุด 334 บาท/ครั้ง)</label>
+          <div class="btnrow">${[1,2,3,4,5].map(n=>`<button type="button" class="btn ghost small" data-tc-tap-times="${n}">×${n}</button>`).join('')}</div>
+          <input type="text" inputmode="decimal" min="0" step="1" id="f_tapThaiChuayAmount" value="334" style="margin-top:6px;">
+          <input type="hidden" id="f_tapThaiChuayTimes" value="1">
+          <button type="button" class="btn ghost small" id="taskCompleteUseTapThaiChuayBtn" style="margin-top:6px;">➕ ใส่ยอดนี้ในช่องจำนวนเงิน</button>
+        </div>
+      </div>
       <div class="field">
         <label style="display:flex;align-items:center;gap:8px;font-weight:400;"><input type="checkbox" id="f_unpaid" style="width:auto;"> ยังไม่จ่ายเงิน (ค้างจ่าย)</label>
         <label style="display:flex;align-items:center;gap:8px;font-weight:400;margin-top:6px;"><input type="checkbox" id="f_cylpending" style="width:auto;"> ยังไม่คืนถังเปล่า (ค้างถัง)</label>
@@ -4693,6 +4775,39 @@ function openTaskCompleteForm(taskId){
       <div class="rem-meta" style="margin-top:2px;">ใส่จำนวนที่จะหักจากเครดิตแทนเงินสด — ไม่นับซ้ำเป็นรายรับอีกรอบ (นับไปแล้วตอนกดเครดิต)</div>
     </div>`;
   })();
+  // "กดตอนนี้เลย" taps — same idea as in openSaleForm: customer pays for THIS delivery by tapping a
+  // benefit on the spot rather than redeeming a pre-banked balance. Log-only on submit, no balance
+  // change, no creditApplied (the amount is already counted normally via f_amount).
+  const tapPrachanatCheckboxTC = document.getElementById('f_tapPrachanatNow');
+  const tapPrachanatBoxTC = document.getElementById('taskCompleteTapPrachanatBox');
+  const tapPrachanatCardsInputTC = document.getElementById('f_tapPrachanatCards');
+  const tapPrachanatTotalElTC = document.getElementById('taskCompleteTapPrachanatTotal');
+  function updateTCTapPrachanatTotal(){
+    const cards = Math.max(1, Number(tapPrachanatCardsInputTC.value)||1);
+    tapPrachanatTotalElTC.textContent = fmtMoney(cards*80);
+  }
+  tapPrachanatCheckboxTC.addEventListener('change', ()=>{
+    tapPrachanatBoxTC.style.display = tapPrachanatCheckboxTC.checked? 'block' : 'none';
+    updateTCTapPrachanatTotal();
+  });
+  tapPrachanatCardsInputTC.addEventListener('input', updateTCTapPrachanatTotal);
+  document.getElementById('taskCompleteUseTapPrachanatBtn').addEventListener('click', ()=>{
+    const cards = Math.max(1, Number(tapPrachanatCardsInputTC.value)||1);
+    document.getElementById('f_amount').value = cards*80;
+  });
+  const tapThaiChuayCheckboxTC = document.getElementById('f_tapThaiChuayNow');
+  const tapThaiChuayBoxTC = document.getElementById('taskCompleteTapThaiChuayBox');
+  tapThaiChuayCheckboxTC.addEventListener('change', ()=>{
+    tapThaiChuayBoxTC.style.display = tapThaiChuayCheckboxTC.checked? 'block' : 'none';
+  });
+  document.querySelectorAll('[data-tc-tap-times]').forEach(b=>b.addEventListener('click', ()=>{
+    const n = Number(b.dataset.tcTapTimes)||1;
+    document.getElementById('f_tapThaiChuayAmount').value = 334 * n;
+    document.getElementById('f_tapThaiChuayTimes').value = n;
+  }));
+  document.getElementById('taskCompleteUseTapThaiChuayBtn').addEventListener('click', ()=>{
+    document.getElementById('f_amount').value = Number(document.getElementById('f_tapThaiChuayAmount').value)||0;
+  });
   document.getElementById('useSuggestedPriceBtn').addEventListener('click', ()=>{
     const b = window._lineBuilders['taskCompleteLine']||[];
     const pickup = document.getElementById('f_pickup').checked;
@@ -4715,6 +4830,11 @@ function openTaskCompleteForm(taskId){
     const availablePrachanatCredit = (cust && !saveAsCustomer)? Number(cust.prachanatCredit||0) : 0;
     const prachanatCreditApplied = prachanatCreditInput ? Math.max(0, Math.min(Number(prachanatCreditInput.value)||0, availablePrachanatCredit, Math.max(0, amt - creditApplied))) : 0;
     const residual = Math.max(0, amt - creditApplied - prachanatCreditApplied);
+    const tapPrachanatNow = document.getElementById('f_tapPrachanatNow').checked;
+    const tapPrachanatCards = tapPrachanatNow? Math.max(1, Number(document.getElementById('f_tapPrachanatCards').value)||1) : 0;
+    const tapThaiChuayNow = document.getElementById('f_tapThaiChuayNow').checked;
+    const tapThaiChuayAmount = tapThaiChuayNow? (Number(document.getElementById('f_tapThaiChuayAmount').value)||0) : 0;
+    const tapThaiChuayTimes = tapThaiChuayNow? Math.max(1, Number(document.getElementById('f_tapThaiChuayTimes').value)||1) : 0;
 
     let finalCustomerId = t.customerId || null;
 
@@ -4731,7 +4851,9 @@ function openTaskCompleteForm(taskId){
         gasCylindersBreakdown: cylinderPending? breakdownToLineItems(breakdown) : [],
         gasCylinders: cylinderPending? gasQty : 0,
         debt: unpaid? residual : 0,
-        notes: t.note || ''
+        notes: t.note || '',
+        prachanatCreditLog: tapPrachanatNow? [{ id: uid(), date: todayISO(), amount: tapPrachanatCards*80, times: tapPrachanatCards, note: 'จ่ายด้วยบัตรประชารัฐตอนนี้เลย (ส่งแก๊ส)' }] : [],
+        thaiChuayCreditLog: tapThaiChuayNow? [{ id: uid(), date: todayISO(), amount: tapThaiChuayAmount, times: tapThaiChuayTimes, note: 'จ่ายด้วยไทยช่วยไทยตอนนี้เลย (ส่งแก๊ส)' }] : []
       };
       state.customers.push(newCust);
       persistCustomers();
@@ -4759,6 +4881,8 @@ function openTaskCompleteForm(taskId){
         if(unpaid && residual>0) updated.debt = Number(updated.debt||0) + residual;
         if(creditApplied>0) updated.thaiChuayCredit = Math.max(0, Number(updated.thaiChuayCredit||0) - creditApplied);
         if(prachanatCreditApplied>0) updated.prachanatCredit = Math.max(0, Number(updated.prachanatCredit||0) - prachanatCreditApplied);
+        if(tapPrachanatNow) updated.prachanatCreditLog = [...(updated.prachanatCreditLog||[]), { id: uid(), date: todayISO(), amount: tapPrachanatCards*80, times: tapPrachanatCards, note: 'จ่ายด้วยบัตรประชารัฐตอนนี้เลย (ส่งแก๊ส)' }];
+        if(tapThaiChuayNow) updated.thaiChuayCreditLog = [...(updated.thaiChuayCreditLog||[]), { id: uid(), date: todayISO(), amount: tapThaiChuayAmount, times: tapThaiChuayTimes, note: 'จ่ายด้วยไทยช่วยไทยตอนนี้เลย (ส่งแก๊ส)' }];
         if(cylinderPending && gasQty>0) addToCustomerGasBreakdown(updated, breakdownToLineItems(breakdown));
         return updated;
       }).then(()=>render());
