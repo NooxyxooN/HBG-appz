@@ -457,7 +457,7 @@ let purchasesSort = 'date';
 let purchasesArchiveOpen = false;
 let pendingCreditListOpen = false;
 let plDetailPeriod = 'month';
-let dashboardPLPeriod = 'month';
+let dashboardPLPeriod = 'day';
 let plDetailSearch = '';
 let plDetailCustomDate = todayISO();
 let recentSalesSort = 'date';
@@ -467,6 +467,8 @@ let customersFilterOpen = false;
 let customersFilterType = 'all';
 let debtorsFilterOpen = false;
 let debtorsFilterType = 'all';
+let debtorsDateFilter = 'all';
+let debtorsCustomDate = todayISO();
 let debtorSearchQuery = '';
 let tasksFilterOpen = false;
 let tasksFilterType = 'all';
@@ -537,6 +539,43 @@ function getCustomerCycleInfo(customerId){
     isRegular
   };
 }
+
+/* ---------------- Customer tier — automatic (no manual assignment needed), based on recent spend
+   + order frequency, per user's request "ยอดซื้อสะสม/ความถี่". Thresholds are starting defaults;
+   adjust here if they don't match real customer behavior once there's more data to look at.
+   'new'      -> 🆕  (fewer than 2 sales on record — not enough history to judge yet)
+   'inactive' -> 👤 greyed out (used to order, but nothing in the last 90 days — same faded
+                 grayscale/opacity treatment already used for empty tanks on ถังบนรถ, for visual
+                 consistency across the app)
+   'diamond'  -> 👑  (big spender in the last 6 months, OR orders very often)
+   'regular'  -> 👤  (the same default icon as before — unchanged, no special treatment) ---------------- */
+const CUSTOMER_TIER_INACTIVE_DAYS = 90;
+const CUSTOMER_TIER_DIAMOND_SPEND_180D = 5000; // baht spent in the last ~6 months
+const CUSTOMER_TIER_DIAMOND_MAX_AVG_DAYS = 20; // or orders on average at least this often
+function getCustomerTier(customerId){
+  const salesAll = state.sales.filter(s=>s.customerId===customerId);
+  if(salesAll.length < 2) return 'new';
+  const lastDate = salesAll.reduce((max,s)=> (s.date||'') > max? s.date : max, salesAll[0].date||'');
+  const daysSinceLast = Math.round((Date.now() - Date.parse(lastDate)) / 86400000);
+  if(!isNaN(daysSinceLast) && daysSinceLast > CUSTOMER_TIER_INACTIVE_DAYS) return 'inactive';
+  const cutoffMs = Date.now() - 180*86400000;
+  const recentSpend = salesAll.filter(s=>Date.parse(s.date)>=cutoffMs).reduce((a,s)=>a+Number(s.amount||0),0);
+  const cycle = getCustomerCycleInfo(customerId);
+  if(recentSpend >= CUSTOMER_TIER_DIAMOND_SPEND_180D || (cycle && cycle.avgDays<=CUSTOMER_TIER_DIAMOND_MAX_AVG_DAYS)) return 'diamond';
+  return 'regular';
+}
+// line-art outline person (white body, grey stroke) for the "inactive" tier — deliberately NOT a
+// filled emoji like the other tiers, so it reads as "faded/hollow" at a glance rather than just a
+// dimmed version of the same icon
+const INACTIVE_TIER_ICON_SVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="#fff" stroke="#9a9a9a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;"><circle cx="12" cy="8" r="4"></circle><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1"></path></svg>`;
+function customerTierIconHtml(customerId){
+  const tier = getCustomerTier(customerId);
+  if(tier==='new') return '🆕';
+  if(tier==='diamond') return '👑';
+  if(tier==='inactive') return `<span title="ลูกค้าเก่าที่หายไปนาน (ไม่ได้สั่งเกิน 90 วัน)">${INACTIVE_TIER_ICON_SVG}</span>`;
+  return '👤';
+}
+const CUSTOMER_TIER_LABELS = { new:'🆕 ลูกค้าใหม่', diamond:'👑 เพชร', inactive:'👤 หายไปนาน', regular:'👤 ทั่วไป' };
 
 // customers whose predicted next order falls within `withinDays` (including already-overdue ones),
 // sorted most-overdue first — feeds the "ใกล้ถึงรอบส่งแล้ว" dashboard section
@@ -733,11 +772,28 @@ function trySaveDailySummaryIfDue(){
   persistDailySummaries();
 }
 // lets the shop owner force a fresh recompute for any day (today or history) straight from current
-// sales/purchases/transactions data — the fix for a stale/wrong snapshot that already got saved
+// sales/purchases/transactions data — the fix for a stale/wrong snapshot that already got saved.
+// Does NOT navigate anywhere itself — callers re-render whichever daily-summary view is currently open.
 function recomputeDailySummary(dateStr){
   state.dailySummaries[dateStr] = computeDailySummary(dateStr);
   persistDailySummaries();
-  openDailySummaryModal();
+}
+// live breakdown of tanks sold on a given date, by size/brand — computed on demand from state.sales
+// (not frozen into the snapshot) so it always reflects any later edits/deletions to that day's sales
+function dailySummaryTanksSoldBreakdown(dateStr){
+  const totals = {};
+  state.sales.filter(s=>s.date===dateStr).forEach(s=>{
+    breakdownToLineItems(s.gasBreakdown||[]).forEach(item=>{
+      if(!item.qty) return;
+      const key = item.size+'_'+item.brand;
+      if(!totals[key]) totals[key] = { size:item.size, brand:item.brand, qty:0 };
+      totals[key].qty += item.qty;
+    });
+  });
+  return Object.values(totals).filter(i=>i.qty>0);
+}
+function dailySummaryTanksSoldTotal(dateStr){
+  return dailySummaryTanksSoldBreakdown(dateStr).reduce((a,i)=>a+i.qty,0);
 }
 
 function ensureInventorySlot(sz, brand){
@@ -1879,6 +1935,34 @@ function openEditInventoryForm(){
   });
 }
 
+// shared stat grid used by both the main (today) view and the per-day history detail view — the
+// three "แตะดู" cells are live drill-downs (computed from state.sales on demand, not the frozen
+// snapshot) so they stay accurate even for old days whose sales got edited afterward
+function dailySummaryStatGridHtml(s){
+  return `
+    <div class="grid2" style="margin-bottom:10px;">
+      <div class="stat"><div class="label">รายรับ</div><div class="value sale">฿${fmtMoney(s.income)}</div></div>
+      <div class="stat"><div class="label">รายจ่าย</div><div class="value debt">฿${fmtMoney(s.expense)}</div></div>
+      <div class="stat"><div class="label">กำไร</div><div class="value" style="color:${s.profit>=0?'var(--green)':'var(--red)'};">฿${fmtMoney(s.profit)}</div></div>
+      <div class="stat" data-view-daily-debtors="1" style="cursor:pointer;"><div class="label">หนี้ใหม่ (แตะดู)</div><div class="value debt">฿${fmtMoney(s.newDebtToday)}</div></div>
+      <div class="stat"><div class="label">ถังเต็มคงเหลือ</div><div class="value mono">${fmtMoney(s.fullTotal)}</div></div>
+      <div class="stat"><div class="label">ถังเปล่าคงเหลือ</div><div class="value mono">${fmtMoney(s.emptyTotal)}</div></div>
+      <div class="stat"><div class="label">ถังยืมอยู่กับลูกค้า</div><div class="value mono">${fmtMoney(s.borrowedTotal)}</div></div>
+      <div class="stat"><div class="label">ลูกค้าใหม่</div><div class="value mono">${s.newCustomersToday}</div></div>
+      <div class="stat" data-view-daily-sales="1" style="cursor:pointer;"><div class="label">รายการขาย (แตะดู)</div><div class="value mono">${s.salesCountToday} รายการ</div></div>
+      <div class="stat" data-view-daily-tanks="1" style="cursor:pointer;"><div class="label">ถังขาย (แตะดู)</div><div class="value mono">${dailySummaryTanksSoldTotal(s.date)} ถัง</div></div>
+    </div>`;
+}
+function wireDailySummaryStatClicks(dateStr){
+  const debtorsCell = document.querySelector('[data-view-daily-debtors]');
+  if(debtorsCell) debtorsCell.addEventListener('click', ()=>openDailySummaryDebtorsDetail(dateStr));
+  const salesCell = document.querySelector('[data-view-daily-sales]');
+  if(salesCell) salesCell.addEventListener('click', ()=>openDailySummarySalesDetail(dateStr));
+  const tanksCell = document.querySelector('[data-view-daily-tanks]');
+  if(tanksCell) tanksCell.addEventListener('click', ()=>openDailySummaryTanksDetail(dateStr));
+}
+// root entry point — today's full stat grid inline, plus a scrollable history list where each card
+// (aside from its own "คำนวณใหม่" button) is tappable to drill into that day's full detail view
 function openDailySummaryModal(){
   const today = todayISO();
   const todaySummary = state.dailySummaries[today] || computeDailySummary(today);
@@ -1886,28 +1970,13 @@ function openDailySummaryModal(){
     ? `บันทึกอัตโนมัติแล้วเมื่อ ${new Date(state.dailySummaries[today].savedAt).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'})} น.`
     : 'กำลังจะบันทึกอัตโนมัติ (เปิดแอพทิ้งไว้สักครู่) — นี่คือข้อมูลล่าสุด ณ ตอนนี้';
 
-  function summaryRowsHtml(s){
-    return `
-      <div class="grid2" style="margin-bottom:10px;">
-        <div class="stat"><div class="label">รายรับวันนี้</div><div class="value sale">฿${fmtMoney(s.income)}</div></div>
-        <div class="stat"><div class="label">รายจ่ายวันนี้</div><div class="value debt">฿${fmtMoney(s.expense)}</div></div>
-        <div class="stat"><div class="label">กำไรวันนี้</div><div class="value" style="color:${s.profit>=0?'var(--green)':'var(--red)'};">฿${fmtMoney(s.profit)}</div></div>
-        <div class="stat"><div class="label">หนี้ใหม่วันนี้</div><div class="value debt">฿${fmtMoney(s.newDebtToday)}</div></div>
-        <div class="stat"><div class="label">ถังเต็มคงเหลือ</div><div class="value mono">${fmtMoney(s.fullTotal)}</div></div>
-        <div class="stat"><div class="label">ถังเปล่าคงเหลือ</div><div class="value mono">${fmtMoney(s.emptyTotal)}</div></div>
-        <div class="stat"><div class="label">ถังยืมอยู่กับลูกค้า</div><div class="value mono">${fmtMoney(s.borrowedTotal)}</div></div>
-        <div class="stat"><div class="label">ลูกค้าใหม่วันนี้</div><div class="value mono">${s.newCustomersToday}</div></div>
-        <div class="stat" style="grid-column:span 2;"><div class="label">จำนวนรายการขายวันนี้</div><div class="value mono">${s.salesCountToday} รายการ</div></div>
-      </div>`;
-  }
-
   const historyKeys = Object.keys(state.dailySummaries).filter(d=>d!==today).sort((a,b)=>b.localeCompare(a)).slice(0,7);
   const historyHtml = historyKeys.length ? `
-    <h2 class="section-title">ย้อนหลัง</h2>
+    <h2 class="section-title">ย้อนหลัง (แตะการ์ดเพื่อดูรายละเอียด)</h2>
     <div class="rem-meta" style="margin-bottom:8px;">ถ้าตัวเลขวันไหนดูผิดปกติ (เช่น ขึ้น ฿0 ทั้งที่มีขายจริง) มักเป็นเพราะวันนั้นไม่ได้เปิดแอปเลยจนครบวัน หรือมีคนบันทึกรายการเพิ่มหลังแอปปิดไปแล้ว — กด "คำนวณใหม่" ของวันนั้นเพื่อดึงข้อมูลล่าสุดมาคำนวณซ้ำได้เลย</div>
     ${historyKeys.map(d=>{
       const s = state.dailySummaries[d];
-      return `<div class="card">
+      return `<div class="card" data-open-daily-detail="${d}" style="cursor:pointer;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
           <div style="font-weight:700;">${fmtDateShort(d)}</div>
           <button type="button" class="btn ghost small" data-recompute-summary="${d}">🔄 คำนวณใหม่</button>
@@ -1924,9 +1993,10 @@ function openDailySummaryModal(){
   const body = `
     <h3>📋 สรุปผลประจำวัน — ${fmtDateShort(today)}</h3>
     <div class="rem-meta" style="margin-bottom:10px;">${statusNote}</div>
-    ${summaryRowsHtml(todaySummary)}
+    ${dailySummaryStatGridHtml(todaySummary)}
     <div class="btnrow" style="margin-bottom:10px;">
       <button type="button" class="btn ghost small" data-recompute-summary="${today}">🔄 คำนวณสรุปวันนี้ใหม่</button>
+      <button type="button" class="btn primary small" id="shareDailySummaryBtn">📤 แชร์</button>
     </div>
     ${historyHtml}
     <div class="btnrow" style="margin-top:12px;">
@@ -1934,8 +2004,135 @@ function openDailySummaryModal(){
     </div>
   `;
   showModal(body);
+  wireDailySummaryStatClicks(today);
+  document.querySelectorAll('[data-recompute-summary]').forEach(b=>b.addEventListener('click', e=>{
+    e.stopPropagation();
+    recomputeDailySummary(b.dataset.recomputeSummary);
+    openDailySummaryModal();
+  }));
+  const shareBtn = document.getElementById('shareDailySummaryBtn');
+  if(shareBtn) shareBtn.addEventListener('click', ()=>openShareDailySummaryModal(today));
+  document.querySelectorAll('[data-open-daily-detail]').forEach(card=>card.addEventListener('click', ()=>{
+    openDailySummaryDayDetailModal(card.dataset.openDailyDetail);
+  }));
+}
+// per-day detail view for a HISTORY date (same stat grid as today, plus its own share/recompute,
+// with a back button returning to the main list) — kept separate from openDailySummaryModal so
+// "back" always means "the root list", not "wherever we happened to come from"
+function openDailySummaryDayDetailModal(dateStr){
+  const s = state.dailySummaries[dateStr] || computeDailySummary(dateStr);
+  const body = `
+    <h3>📋 สรุปผลประจำวัน — ${fmtDateShort(dateStr)}</h3>
+    ${dailySummaryStatGridHtml(s)}
+    <div class="btnrow" style="margin-bottom:10px;">
+      <button type="button" class="btn ghost small" data-recompute-summary="${dateStr}">🔄 คำนวณใหม่</button>
+      <button type="button" class="btn primary small" id="shareDailySummaryBtn">📤 แชร์</button>
+    </div>
+    <div class="btnrow" style="margin-top:12px;">
+      <button type="button" class="btn ghost" id="backToDailySummaryListBtn">← กลับ</button>
+    </div>
+  `;
+  showModal(body);
+  wireDailySummaryStatClicks(dateStr);
   document.querySelectorAll('[data-recompute-summary]').forEach(b=>b.addEventListener('click', ()=>{
     recomputeDailySummary(b.dataset.recomputeSummary);
+    openDailySummaryDayDetailModal(dateStr);
+  }));
+  const shareBtn = document.getElementById('shareDailySummaryBtn');
+  if(shareBtn) shareBtn.addEventListener('click', ()=>openShareDailySummaryModal(dateStr));
+  document.getElementById('backToDailySummaryListBtn').addEventListener('click', openDailySummaryModal);
+}
+function openDailySummarySalesDetail(dateStr){
+  const salesToday = state.sales.filter(s=>s.date===dateStr);
+  const body = `
+    <h3>🧾 รายการขาย — ${fmtDateShort(dateStr)}</h3>
+    <div class="rem-meta" style="margin-bottom:10px;">${salesToday.length} รายการ</div>
+    ${salesToday.length? salesToday.map(s=>{
+      const cust = s.customerId? state.customers.find(c=>c.id===s.customerId) : null;
+      const name = cust? cust.name : (s.note || 'ลูกค้าหน้าร้าน');
+      return `<div class="card" style="padding:10px 14px;margin-bottom:6px;">
+        <div style="display:flex;justify-content:space-between;gap:8px;"><b>${escapeHtml(name)}</b><span class="mono">฿${fmtMoney(s.amount)}</span></div>
+        ${s.gasBreakdown && sumGasBreakdown(s.gasBreakdown)>0? `<div class="rem-meta">${gasBreakdownSummary(s.gasBreakdown)}</div>` : ''}
+        ${s.unpaid? `<span class="tag debt">ค้างจ่าย</span>` : ''}
+      </div>`;
+    }).join('') : '<div class="empty">ยังไม่มีรายการขายวันนี้</div>'}
+    <div class="btnrow" style="margin-top:12px;">
+      <button type="button" class="btn ghost" id="backToDailySummaryDayBtn">← กลับ</button>
+    </div>
+  `;
+  showModal(body);
+  document.getElementById('backToDailySummaryDayBtn').addEventListener('click', ()=>openDailySummaryDayDetailModal(dateStr));
+}
+function openDailySummaryDebtorsDetail(dateStr){
+  const debtSales = state.sales.filter(s=>s.date===dateStr && s.unpaid && Number(s.amount||0)>0);
+  const body = `
+    <h3>📕 หนี้ใหม่วันนี้ — ${fmtDateShort(dateStr)}</h3>
+    <div class="rem-meta" style="margin-bottom:10px;">${debtSales.length} รายการ · รวม ฿${fmtMoney(debtSales.reduce((a,s)=>a+Number(s.amount||0),0))}</div>
+    ${debtSales.length? debtSales.map(s=>{
+      const cust = s.customerId? state.customers.find(c=>c.id===s.customerId) : null;
+      const name = cust? cust.name : (s.note || 'ไม่ระบุชื่อ');
+      return `<div class="card" style="padding:10px 14px;margin-bottom:6px;display:flex;justify-content:space-between;gap:8px;">
+        <b>${escapeHtml(name)}</b><span class="mono" style="color:var(--red);">฿${fmtMoney(s.amount)}</span>
+      </div>`;
+    }).join('') : '<div class="empty">วันนี้ไม่มีหนี้ใหม่</div>'}
+    <div class="btnrow" style="margin-top:12px;">
+      <button type="button" class="btn ghost" id="backToDailySummaryDayBtn">← กลับ</button>
+    </div>
+  `;
+  showModal(body);
+  document.getElementById('backToDailySummaryDayBtn').addEventListener('click', ()=>openDailySummaryDayDetailModal(dateStr));
+}
+function openDailySummaryTanksDetail(dateStr){
+  const breakdown = dailySummaryTanksSoldBreakdown(dateStr);
+  const total = breakdown.reduce((a,i)=>a+i.qty,0);
+  const body = `
+    <h3>🛢️ ถังขาย — ${fmtDateShort(dateStr)}</h3>
+    <div class="mono" style="font-size:20px;color:var(--orange-dark);margin-bottom:12px;">${fmtMoney(total)} ถัง</div>
+    ${breakdown.length? breakdown.map(i=>`
+      <div class="card" style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;">
+        <div style="font-weight:600;">${i.size} kg — ${GAS_BRAND_LABELS[i.brand]}</div>
+        <div class="mono" style="color:var(--orange-dark);">${i.qty} ถัง</div>
+      </div>`).join('') : '<div class="empty">ยังไม่มีการขายถังวันนี้</div>'}
+    <div class="btnrow" style="margin-top:12px;">
+      <button type="button" class="btn ghost" id="backToDailySummaryDayBtn">← กลับ</button>
+    </div>
+  `;
+  showModal(body);
+  document.getElementById('backToDailySummaryDayBtn').addEventListener('click', ()=>openDailySummaryDayDetailModal(dateStr));
+}
+// reuses the same width-chooser + exportReceiptImage pipeline as openExportReceiptModal
+// (debtors/tasks receipts) so a daily summary can be shared to LINE/Messenger/printed the same way
+function buildDailySummaryReceiptHtml(dateStr){
+  const s = state.dailySummaries[dateStr] || computeDailySummary(dateStr);
+  const tanksBreakdown = dailySummaryTanksSoldBreakdown(dateStr);
+  const tanksTotal = tanksBreakdown.reduce((a,i)=>a+i.qty,0);
+  const tanksText = tanksBreakdown.length? tanksBreakdown.map(i=>`${GAS_BRAND_LABELS[i.brand]} ${i.size}kg×${i.qty}`).join(', ') : 'ไม่มี';
+  let html = `<div style="text-align:center;font-weight:bold;font-size:1.15em;margin-bottom:8px;">=== สรุปผลประจำวัน ===</div>
+  <div style="text-align:center;margin-bottom:18px;">${fmtDateShort(dateStr)}</div>
+  <div style="border-top:3px solid #000;margin-bottom:18px;"></div>
+  <div style="margin-bottom:10px;">รายรับ: ฿${fmtMoney(s.income)}<br>รายจ่าย: ฿${fmtMoney(s.expense)}<br>กำไร: ฿${fmtMoney(s.profit)}</div>
+  <div style="margin-bottom:10px;">หนี้ใหม่วันนี้: ฿${fmtMoney(s.newDebtToday)}<br>รายการขาย: ${s.salesCountToday} รายการ<br>ถังขาย: ${tanksTotal} ถัง (${tanksText})</div>
+  <div style="margin-bottom:10px;">ถังเต็มคงเหลือ: ${fmtMoney(s.fullTotal)}<br>ถังเปล่าคงเหลือ: ${fmtMoney(s.emptyTotal)}<br>ถังยืมอยู่กับลูกค้า: ${fmtMoney(s.borrowedTotal)}<br>ลูกค้าใหม่วันนี้: ${s.newCustomersToday}</div>
+  <div style="border-top:3px solid #000;margin-top:6px;padding-top:10px;text-align:center;font-size:0.85em;">— พิมพ์จากสมุดบัญชีร้าน —</div>`;
+  return `<div style="font-family:'Sarabun',sans-serif;font-size:2.2em;">${html}</div>`;
+}
+function openShareDailySummaryModal(dateStr){
+  const body = `
+    <h3>📤 Export เป็นรูปสำหรับพิมพ์</h3>
+    <div class="rem-meta" style="margin-bottom:12px;line-height:1.6;">เลือกความกว้างให้ตรงกับเครื่องพิมพ์ Peripage ของคุณ (ไม่แน่ใจให้เลือก 384px ไปก่อน)</div>
+    <div class="btnrow">
+      <button class="btn primary" data-export-width="384">384px (มาตรฐาน 203dpi)</button>
+      <button class="btn ghost" data-export-width="576">576px (รุ่นสูง 304dpi)</button>
+    </div>
+    <div class="btnrow" style="margin-top:14px;">
+      <button type="button" class="btn ghost" id="cancelModal">ยกเลิก</button>
+    </div>
+  `;
+  showModal(body);
+  document.querySelectorAll('[data-export-width]').forEach(b=>b.addEventListener('click', async ()=>{
+    const width = Number(b.dataset.exportWidth);
+    b.textContent = 'กำลังสร้างรูป...';
+    await exportReceiptImage('สรุปผลประจำวัน_'+dateStr, buildDailySummaryReceiptHtml(dateStr), width);
   }));
 }
 
@@ -2332,7 +2529,7 @@ function renderCustomers(){
   const toolRow = `<div class="btnrow" style="margin-bottom:10px;"><button class="btn ghost small" id="openImportBtn">📋 นำเข้าหลายรายการ</button><button class="btn ghost small" id="exportCsvBtn">📤 ส่งออก CSV</button><button class="btn ${dupeGroupCount? 'primary':'ghost'} small" id="openDupeCheckBtn">🔀 ตรวจสอบชื่อซ้ำ${dupeGroupCount? ` (${dupeGroupCount})` : ''}</button><button class="btn ghost small" id="openManualMergeBtn">🔀 รวมลูกค้าเอง</button></div>`;
 
   const activeSummary = [];
-  if(customersFilterType!=='all') activeSummary.push({debt:'มีหนี้',gas:'มีถังค้าง',nophone:'ไม่มีเบอร์โทร'}[customersFilterType]);
+  if(customersFilterType!=='all') activeSummary.push({debt:'มีหนี้',gas:'มีถังค้าง',nophone:'ไม่มีเบอร์โทร',tierDiamond:'👑 เพชร',tierInactive:'👤 หายไปนาน',tierNew:'🆕 ลูกค้าใหม่'}[customersFilterType]);
   const sortLabels = {name:'ชื่อ',debt:'ยอดหนี้',gas:'ถังค้าง',recent:'เพิ่มล่าสุด'};
   activeSummary.push('เรียงตาม'+sortLabels[customersSort]);
   const searchBar = `<div class="field" style="margin-bottom:10px;"><input id="custSearchInput" placeholder="🔍 ค้นหาชื่อหรือเบอร์โทรลูกค้า..." value="${escapeAttr(customerSearchQuery)}"></div>`;
@@ -2344,11 +2541,14 @@ function renderCustomers(){
   let panel = '';
   if(customersFilterOpen){
     const filterChips = [['all','ทั้งหมด'],['debt','มีหนี้'],['gas','มีถังค้าง'],['nophone','ไม่มีเบอร์โทร']];
+    const tierChips = [['tierDiamond','👑 เพชร'],['tierInactive','👤 หายไปนาน'],['tierNew','🆕 ลูกค้าใหม่']];
     const sortOptions = [['name','ชื่อ'],['debt','ยอดหนี้'],['gas','ถังค้าง'],['recent','เพิ่มล่าสุด']];
     panel = `
       <div class="stamp-card" style="margin-bottom:12px;">
         <div class="rem-meta" style="margin-bottom:6px;font-weight:700;">กรอง</div>
         <div class="btnrow" style="margin-bottom:10px;">${filterChips.map(([k,l])=>`<button class="btn ${customersFilterType===k?'primary':'ghost'} small" data-cust-filter="${k}">${l}</button>`).join('')}</div>
+        <div class="rem-meta" style="margin-bottom:6px;font-weight:700;">กรองตาม tier (คำนวณอัตโนมัติจากยอดซื้อ/ความถี่)</div>
+        <div class="btnrow" style="margin-bottom:10px;">${tierChips.map(([k,l])=>`<button class="btn ${customersFilterType===k?'primary':'ghost'} small" data-cust-filter="${k}">${l}</button>`).join('')}</div>
         <div class="rem-meta" style="margin-bottom:6px;font-weight:700;">เรียงตาม</div>
         <div class="btnrow">${sortOptions.map(([k,l])=>`<button class="btn ${customersSort===k?'primary':'ghost'} small" data-cust-sort="${k}">${l}</button>`).join('')}</div>
       </div>`;
@@ -2362,6 +2562,9 @@ function renderCustomers(){
   if(customersFilterType==='debt') list = list.filter(c=>Number(c.debt||0)>0);
   else if(customersFilterType==='gas') list = list.filter(c=>Number(c.gasCylinders||0)>0);
   else if(customersFilterType==='nophone') list = list.filter(c=>!c.phone);
+  else if(customersFilterType==='tierDiamond') list = list.filter(c=>getCustomerTier(c.id)==='diamond');
+  else if(customersFilterType==='tierInactive') list = list.filter(c=>getCustomerTier(c.id)==='inactive');
+  else if(customersFilterType==='tierNew') list = list.filter(c=>getCustomerTier(c.id)==='new');
   if(customersSort==='debt') list.sort((a,b)=>Number(b.debt||0)-Number(a.debt||0));
   else if(customersSort==='gas') list.sort((a,b)=>Number(b.gasCylinders||0)-Number(a.gasCylinders||0));
   else if(customersSort==='recent') list.sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));
@@ -2450,7 +2653,7 @@ function renderCustomerCard(c, opts){
   const cycle = isHistoryExpanded ? getCustomerCycleInfo(c.id) : null;
   return `
   <div class="card">
-    <div class="cust-name">👤 ${escapeHtml(c.name)}</div>
+    <div class="cust-name">${customerTierIconHtml(c.id)} ${escapeHtml(c.name)}</div>
     <div class="cust-row">
       <span>${c.phone? '📞 '+escapeHtml(c.phone) : ''}</span>
       ${link? `<a class="maps-link" href="${link}" target="_blank" rel="noopener">🧭 นำทาง</a>` : ''}
@@ -4335,6 +4538,13 @@ function renderDebtorRow(c){
   </div>`;
 }
 
+// true if this customer picked up NEW debt (cash and/or cylinder) on the given date — used by the
+// "ของวันนี้ / เลือกวัน" debtors filter. Looks at state.sales directly (unpaid / cylinderPending
+// entries are how every debt-creating flow — Sale form, Task-complete, เพิ่มยอดหนี้ — logs it) rather
+// than customer.debt (which is just a running balance with no per-day breakdown)
+function customerHasNewDebtOnDate(customerId, dateStr){
+  return state.sales.some(s=> s.customerId===customerId && s.date===dateStr && (s.unpaid || s.cylinderPending));
+}
 function renderDebtors(){
   let debtors = state.customers.filter(c=> Number(c.debt||0)>0 || Number(c.gasCylinders||0)>0);
   const totalMoney = debtors.reduce((a,c)=>a+Number(c.debt||0),0);
@@ -4342,6 +4552,8 @@ function renderDebtors(){
 
   const activeSummary = [];
   if(debtorsFilterType!=='all') activeSummary.push({debtOnly:'เฉพาะหนี้เงิน',gasOnly:'เฉพาะถังค้าง'}[debtorsFilterType]);
+  if(debtorsDateFilter==='today') activeSummary.push('หนี้ใหม่วันนี้');
+  else if(debtorsDateFilter==='custom') activeSummary.push('หนี้ใหม่วันที่ '+fmtDateShort(debtorsCustomDate));
   const sortLabels = {total:'รวมหนักสุด',name:'ชื่อ',debt:'ยอดหนี้',gas:'ถังค้าง',recent:'ลูกค้ารายล่าสุด'};
   activeSummary.push('เรียงตาม'+sortLabels[debtorsSort]);
   const searchBar = `<div class="field" style="margin-bottom:10px;"><input id="debtorSearchInput" placeholder="🔍 ค้นหาชื่อหรือเบอร์โทร..." value="${escapeAttr(debtorSearchQuery)}"></div>`;
@@ -4354,11 +4566,15 @@ function renderDebtors(){
   let panel = '';
   if(debtorsFilterOpen){
     const filterChips = [['all','ทั้งหมด'],['debtOnly','เฉพาะหนี้เงิน'],['gasOnly','เฉพาะถังค้าง']];
+    const dateChips = [['all','ทั้งหมด'],['today','ของวันนี้'],['custom','เลือกวัน']];
     const sortOptions = [['total','รวมหนักสุด'],['name','ชื่อ'],['debt','ยอดหนี้'],['gas','ถังค้าง'],['recent','เพิ่มล่าสุด']];
     panel = `
       <div class="stamp-card" style="margin-bottom:12px;">
         <div class="rem-meta" style="margin-bottom:6px;font-weight:700;">กรอง</div>
         <div class="btnrow" style="margin-bottom:10px;">${filterChips.map(([k,l])=>`<button class="btn ${debtorsFilterType===k?'primary':'ghost'} small" data-debtor-filter="${k}">${l}</button>`).join('')}</div>
+        <div class="rem-meta" style="margin-bottom:6px;font-weight:700;">กรองตามวันที่เป็นหนี้ใหม่</div>
+        <div class="btnrow" style="margin-bottom:${debtorsDateFilter==='custom'?'8px':'10px'};">${dateChips.map(([k,l])=>`<button class="btn ${debtorsDateFilter===k?'primary':'ghost'} small" data-debtor-date-filter="${k}">${l}</button>`).join('')}</div>
+        ${debtorsDateFilter==='custom'? `<div class="field" style="margin-bottom:10px;"><input type="date" id="debtorCustomDateInput" value="${debtorsCustomDate}"></div>` : ''}
         <div class="rem-meta" style="margin-bottom:6px;font-weight:700;">เรียงตาม</div>
         <div class="btnrow">${sortOptions.map(([k,l])=>`<button class="btn ${debtorsSort===k?'primary':'ghost'} small" data-debtor-sort="${k}">${l}</button>`).join('')}</div>
       </div>`;
@@ -4370,6 +4586,8 @@ function renderDebtors(){
   if(q){ debtors = debtors.filter(c=> c.name.toLowerCase().includes(q) || (c.phone||'').toLowerCase().includes(q)); }
   if(debtorsFilterType==='debtOnly') debtors = debtors.filter(c=>Number(c.debt||0)>0);
   else if(debtorsFilterType==='gasOnly') debtors = debtors.filter(c=>Number(c.gasCylinders||0)>0);
+  if(debtorsDateFilter==='today') debtors = debtors.filter(c=>customerHasNewDebtOnDate(c.id, todayISO()));
+  else if(debtorsDateFilter==='custom') debtors = debtors.filter(c=>customerHasNewDebtOnDate(c.id, debtorsCustomDate));
 
   if(debtorsSort==='name') debtors.sort((a,b)=>a.name.localeCompare(b.name,'th'));
   else if(debtorsSort==='debt') debtors.sort((a,b)=>Number(b.debt||0)-Number(a.debt||0));
@@ -4393,6 +4611,10 @@ function renderDebtors(){
 }
 
 /* ---------------- TASKS (daily delivery checklist) ---------------- */
+// per-device display toggle (localStorage, like billSenderName/prachanatStaffName) so the shop
+// owner can turn the 🪪 ประชารัฐ icon on the Tasks tab off if it gets too cluttered — defaults to on
+function getShowPrachanatTaskIcon(){ return localStorage.getItem('showPrachanatTaskIcon') !== '0'; }
+function setShowPrachanatTaskIcon(v){ localStorage.setItem('showPrachanatTaskIcon', v? '1':'0'); }
 function renderTasks(){
   const intro = `<div class="rem-meta" style="margin-bottom:12px;line-height:1.6;">รายการนี้เป็นแค่ "เช็คลิสต์ส่งของวันนี้" ชั่วคราว พอกดเสร็จแล้วรายการจะหายไปเลย — ข้อมูลลูกค้าจริงยังอยู่ครบในแท็บ "ลูกค้า" เสมอ ไม่ปนกัน</div>`;
 
@@ -4455,6 +4677,8 @@ function renderTasks(){
         <div class="btnrow" style="margin-bottom:10px;">${filterChips.map(([k,l])=>`<button class="btn ${tasksFilterType===k?'primary':'ghost'} small" data-task-filter="${k}">${l}</button>`).join('')}</div>
         <div class="rem-meta" style="margin-bottom:6px;font-weight:700;">เรียงตาม</div>
         <div class="btnrow">${sortOptions.map(([k,l])=>`<button class="btn ${tasksSort===k?'primary':'ghost'} small" data-tasks-sort="${k}">${l}</button>`).join('')}</div>
+        <div class="rem-meta" style="margin:10px 0 6px;font-weight:700;">แสดงผล</div>
+        <div class="btnrow"><button class="btn ${getShowPrachanatTaskIcon()?'primary':'ghost'} small" id="togglePrachanatTaskIcon">🪪 ไอคอนบัตรประชารัฐข้างปุ่มนำทาง ${getShowPrachanatTaskIcon()?'(เปิดอยู่)':'(ปิดอยู่)'}</button></div>
       </div>`;
   }
 
@@ -4498,13 +4722,25 @@ function renderTasks(){
     const urgencyState = getTaskUrgencyState(t);
     const startedAt = t.timerStartAt || Date.parse(t.createdAt) || Date.now();
     const truckShortfall = t.gasBreakdown? getTruckStockShortfall(t.gasBreakdown) : [];
+    // old-debt badge — quick red flag next to the name so the driver knows before knocking on the
+    // door; kept short (money + cylinder count only, no wording) so it doesn't crowd the card
+    const oldDebtParts = [];
+    if(cust){
+      if(Number(cust.debt||0)>0) oldDebtParts.push(`-${fmtMoney(cust.debt)}`);
+      if(Number(cust.gasCylinders||0)>0) oldDebtParts.push(`ค้าง${cust.gasCylinders}ถัง`);
+    }
+    const oldDebtBadge = oldDebtParts.length? ` <span style="color:var(--red);font-size:11px;font-weight:700;">${oldDebtParts.join(' ')}</span>` : '';
+    const hasPrachanatCredit = cust && Number(cust.prachanatCredit||0)>0 && getShowPrachanatTaskIcon();
     return `
     <div class="card rem-card">
       <div class="checkbox" data-complete-task="${t.id}" style="cursor:pointer;"></div>
       <div style="flex:1;">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
-          <div class="rem-title"><span data-set-urgency="${t.id}" style="cursor:pointer;padding:2px 4px;margin:-2px -4px;border-radius:6px;" title="แตะเพื่อเปลี่ยนสถานะ">${getTaskUrgencyIcon(urgencyState)}</span> ${escapeHtml(displayName)}${truckShortfall.length? ` <span title="ถังในรถไม่พอสำหรับลูกค้านี้">⚠️</span>` : ''}</div>
-          ${navLink? `<a class="btn ghost small" href="${navLink}" target="_blank" rel="noopener" style="text-decoration:none;flex-shrink:0;">🧭 นำทาง</a>` : ''}
+          <div class="rem-title"><span data-set-urgency="${t.id}" style="cursor:pointer;padding:2px 4px;margin:-2px -4px;border-radius:6px;" title="แตะเพื่อเปลี่ยนสถานะ">${getTaskUrgencyIcon(urgencyState)}</span> ${escapeHtml(displayName)}${truckShortfall.length? ` <span title="ถังในรถไม่พอสำหรับลูกค้านี้">⚠️</span>` : ''}${oldDebtBadge}</div>
+          <div style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
+            ${hasPrachanatCredit? `<span title="มีเครดิตบัตรประชารัฐ ฿${fmtMoney(cust.prachanatCredit)}">🪪</span>` : ''}
+            ${navLink? `<a class="btn ghost small" href="${navLink}" target="_blank" rel="noopener" style="text-decoration:none;">🧭 นำทาง</a>` : ''}
+          </div>
         </div>
         <div class="rem-meta">${getTaskUrgencyLabel(urgencyState)} · ${formatElapsed(startedAt)}</div>
         ${t.gasBreakdown && sumGasBreakdown(t.gasBreakdown)>0? `<div class="rem-meta">${gasBrandIconsHtml(t.gasBreakdown, 16) || '🛢️'} ${gasBreakdownSummary(t.gasBreakdown)}</div>` : ''}
@@ -5357,6 +5593,9 @@ function attachHandlers(){
   const exportDebtorsBtn = document.getElementById('exportDebtorsBtn');
   if(exportDebtorsBtn) exportDebtorsBtn.addEventListener('click', ()=>openExportReceiptModal('debtors'));
   document.querySelectorAll('[data-debtor-filter]').forEach(b=>b.addEventListener('click', ()=>{ debtorsFilterType = b.dataset.debtorFilter; render(); }));
+  document.querySelectorAll('[data-debtor-date-filter]').forEach(b=>b.addEventListener('click', ()=>{ debtorsDateFilter = b.dataset.debtorDateFilter; render(); }));
+  const debtorCustomDateInput = document.getElementById('debtorCustomDateInput');
+  if(debtorCustomDateInput) debtorCustomDateInput.addEventListener('change', ()=>{ debtorsCustomDate = debtorCustomDateInput.value || todayISO(); render(); });
   document.querySelectorAll('[data-debtor-sort]').forEach(b=>b.addEventListener('click', ()=>{ debtorsSort = b.dataset.debtorSort; render(); }));
   const debtorSearchInput = document.getElementById('debtorSearchInput');
   if(debtorSearchInput) debtorSearchInput.addEventListener('input', ()=>{
@@ -5399,6 +5638,8 @@ function attachHandlers(){
   }));
   document.querySelectorAll('[data-rank-sort]').forEach(b=>b.addEventListener('click', ()=>{ rankSort = b.dataset.rankSort; render(); }));
   document.querySelectorAll('[data-tasks-sort]').forEach(b=>b.addEventListener('click', ()=>{ tasksSort = b.dataset.tasksSort; render(); }));
+  const togglePrachanatTaskIcon = document.getElementById('togglePrachanatTaskIcon');
+  if(togglePrachanatTaskIcon) togglePrachanatTaskIcon.addEventListener('click', ()=>{ setShowPrachanatTaskIcon(!getShowPrachanatTaskIcon()); render(); });
   const taskSearchInput = document.getElementById('taskSearchInput');
   if(taskSearchInput) taskSearchInput.addEventListener('input', ()=>{
     taskSearchQuery = taskSearchInput.value;
