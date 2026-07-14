@@ -2136,29 +2136,44 @@ function openShareDailySummaryModal(dateStr){
   }));
 }
 
-function openTransactionForm(){
+// editId lets this double as an edit form for an existing entry — previously add-only, which is
+// why รายรับ/รายจ่ายอื่นๆ entries (manually-added ones, not sales/purchases) couldn't be corrected
+// after saving; now reachable by tapping the row inside the รายรับ/รายจ่าย detail list (see buildPLModalBody)
+function openTransactionForm(editId){
+  const editing = editId? state.transactions.find(t=>t.id===editId) : null;
   const body = `
-    <h3>เพิ่มรายรับ/รายจ่ายอื่นๆ</h3>
+    <h3>${editing? 'แก้ไขรายการ' : 'เพิ่ม'}รายรับ/รายจ่ายอื่นๆ</h3>
     <form class="panel" id="transactionForm" novalidate>
       <div class="field"><label>ประเภท</label>
         <select id="f_txType">
-          <option value="income">💰 รายรับ</option>
-          <option value="expense">💸 รายจ่าย</option>
+          <option value="income" ${editing && editing.type==='income'?'selected':''}>💰 รายรับ</option>
+          <option value="expense" ${editing && editing.type==='expense'?'selected':''}>💸 รายจ่าย</option>
         </select>
       </div>
-      <div class="field"><label>วันที่</label><input type="date" id="f_txDate" value="${todayISO()}"></div>
+      <div class="field"><label>วันที่</label><input type="date" id="f_txDate" value="${editing? editing.date : todayISO()}"></div>
       <div class="field">
         <label>จำนวนเงิน (บาท) *</label>
-        <input type="text" inputmode="decimal" min="0" step="0.01" id="f_txAmount">
+        <input type="text" inputmode="decimal" min="0" step="0.01" id="f_txAmount" value="${editing? editing.amount : ''}">
         <div id="txAmountError" class="rem-meta" style="color:var(--red);display:none;margin-top:4px;">กรุณากรอกจำนวนเงินมากกว่า 0</div>
       </div>
-      <div class="field"><label>รายละเอียด</label><input id="f_txNote" placeholder="เช่น ค่าน้ำมันรถส่ง, ค่าเช่าที่, รายรับพิเศษ"></div>
+      <div class="field"><label>รายละเอียด</label><input id="f_txNote" placeholder="เช่น ค่าน้ำมันรถส่ง, ค่าเช่าที่, รายรับพิเศษ" value="${editing? escapeAttr(editing.note||'') : ''}"></div>
       <div class="btnrow">
-        <button type="submit" class="btn primary">บันทึก</button>
+        <button type="submit" class="btn primary">${editing? 'บันทึกการแก้ไข' : 'บันทึก'}</button>
+        ${editing? `<button type="button" class="btn danger" id="deleteTxBtn">ลบรายการนี้</button>` : ''}
         <button type="button" class="btn ghost" id="cancelModal">ยกเลิก</button>
       </div>
     </form>`;
   showModal(body);
+  if(editing){
+    document.getElementById('deleteTxBtn').addEventListener('click', ()=>{
+      if(confirm('ลบรายการนี้ใช่หรือไม่?')){
+        state.transactions = state.transactions.filter(t=>t.id!==editId);
+        persistTransactions();
+        closeModal();
+        render();
+      }
+    });
+  }
   document.getElementById('transactionForm').addEventListener('submit', e=>{
     e.preventDefault();
     const amt = Number(document.getElementById('f_txAmount').value)||0;
@@ -2167,13 +2182,14 @@ function openTransactionForm(){
       document.getElementById('f_txAmount').focus();
       return;
     }
-    state.transactions.push({
-      id: uid(),
+    const data = {
       type: document.getElementById('f_txType').value,
       date: document.getElementById('f_txDate').value || todayISO(),
       amount: amt,
       note: document.getElementById('f_txNote').value.trim()
-    });
+    };
+    if(editing){ Object.assign(editing, data); }
+    else { state.transactions.push({ id: uid(), ...data }); }
     persistTransactions();
     closeModal();
     render();
@@ -2200,17 +2216,17 @@ function getPLItems(type, period){
       const cust = state.customers.find(c=>c.id===s.customerId);
       const recognized = Number(s.amount||0) - Number(s.creditApplied||0) - Number(s.prachanatCreditApplied||0);
       if(recognized<=0) return;
-      items.push({ date:s.date, amount:recognized, note: cust? cust.name : (s.note||'ยอดขาย') });
+      items.push({ date:s.date, amount:recognized, note: cust? cust.name : (s.note||'ยอดขาย'), id:s.id, source:'sale' });
     });
     state.transactions.filter(t=>t.type==='income' && inPeriod(t.date)).forEach(t=>{
-      items.push({ date:t.date, amount:t.amount, note: t.note||'รายรับอื่นๆ' });
+      items.push({ date:t.date, amount:t.amount, note: t.note||'รายรับอื่นๆ', id:t.id, source:'transaction' });
     });
   } else {
     state.purchases.filter(p=>inPeriod(p.date)).forEach(p=>{
-      items.push({ date:p.date, amount:p.billAmount||0, note: `รับถัง — ${p.supplierName}${p.note? ' · '+p.note:''}` });
+      items.push({ date:p.date, amount:p.billAmount||0, note: `รับถัง — ${p.supplierName}${p.note? ' · '+p.note:''}`, id:p.id, source:'purchase' });
     });
     state.transactions.filter(t=>t.type==='expense' && inPeriod(t.date)).forEach(t=>{
-      items.push({ date:t.date, amount:t.amount, note: t.note||'รายจ่ายอื่นๆ' });
+      items.push({ date:t.date, amount:t.amount, note: t.note||'รายจ่ายอื่นๆ', id:t.id, source:'transaction' });
     });
   }
   items.sort((a,b)=>b.date.localeCompare(a.date));
@@ -2235,8 +2251,9 @@ function buildPLModalBody(type){
     ${dateBar}
     ${searchBar}
     <div class="mono" style="font-size:20px;color:${color};margin-bottom:12px;">฿${fmtMoney(total)} รวม ${items.length} รายการ</div>
+    ${items.length? `<div class="rem-meta" style="margin-bottom:6px;">แตะรายการเพื่อแก้ไข (ยอดขาย/รับถังเปิดฟอร์มเดิม, รายรับ-รายจ่ายอื่นๆ แก้ไข/ลบได้ตรงนี้)</div>` : ''}
     ${items.length? items.map(i=>`
-      <div class="card" style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;">
+      <div class="card" style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;cursor:pointer;" data-pl-item-id="${i.id||''}" data-pl-item-source="${i.source||''}">
         <div>
           <div style="font-weight:600;">${escapeHtml(i.note)}</div>
           <div class="rem-meta">${fmtDateShort(i.date)}</div>
@@ -2275,6 +2292,18 @@ function wirePLModalHandlers(type){
       if(newInput){ newInput.focus(); newInput.setSelectionRange(cursorPos, cursorPos); }
     });
   }
+  // opens whichever edit form actually owns this item — sales/purchases already had their own edit
+  // forms (openSaleForm/openPurchaseForm), only the manually-added รายรับ/รายจ่ายอื่นๆ entries
+  // (source:'transaction') were previously unreachable for editing from here
+  document.querySelectorAll('[data-pl-item-id]').forEach(row=>row.addEventListener('click', ()=>{
+    const id = row.dataset.plItemId;
+    const source = row.dataset.plItemSource;
+    if(!id || !source) return;
+    closeModal();
+    if(source==='sale') openSaleForm(undefined, id);
+    else if(source==='purchase') openPurchaseForm(id);
+    else if(source==='transaction') openTransactionForm(id);
+  }));
 }
 
 function openPLDetailModal(type){
@@ -5562,7 +5591,7 @@ function attachHandlers(){
   if(editInventoryBtn) editInventoryBtn.addEventListener('click', openEditInventoryForm);
   document.querySelectorAll('[data-edit-inv]').forEach(b=>b.addEventListener('click', ()=>openQuickInventoryEdit(b.dataset.editInv)));
   const addTransactionBtn = document.getElementById('addTransactionBtn');
-  if(addTransactionBtn) addTransactionBtn.addEventListener('click', openTransactionForm);
+  if(addTransactionBtn) addTransactionBtn.addEventListener('click', ()=>openTransactionForm());
   const openDailySummaryBtn = document.getElementById('openDailySummaryBtn');
   if(openDailySummaryBtn) openDailySummaryBtn.addEventListener('click', openDailySummaryModal);
   document.querySelectorAll('[data-show-pl]').forEach(el=>el.addEventListener('click', ()=>{
