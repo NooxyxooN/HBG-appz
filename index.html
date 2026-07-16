@@ -2680,9 +2680,10 @@ function renderCustomerCard(c, opts){
   const isHistoryExpanded = expandedHistoryIds.has(c.id);
   const stats = isHistoryExpanded ? getCustomerStats(c.id) : null;
   const cycle = isHistoryExpanded ? getCustomerCycleInfo(c.id) : null;
+  const hasEverUsedPrachanat = Number(c.prachanatCredit||0)>0 || (c.prachanatCreditLog||[]).length>0;
   return `
   <div class="card">
-    <div class="cust-name">${customerTierIconHtml(c.id)} ${escapeHtml(c.name)}</div>
+    <div class="cust-name">${customerTierIconHtml(c.id)} ${escapeHtml(c.name)}${hasEverUsedPrachanat? ` <span data-open-prachanat-history="${c.id}" style="cursor:pointer;font-size:15px;" title="เคยใช้บัตรประชารัฐ — แตะดูประวัติ">🪪</span>` : ''}</div>
     <div class="cust-row">
       <span>${c.phone? '📞 '+escapeHtml(c.phone) : ''}</span>
       ${link? `<a class="maps-link" href="${link}" target="_blank" rel="noopener">🧭 นำทาง</a>` : ''}
@@ -3246,6 +3247,90 @@ function openAddPrachanatCreditPrompt(id){
     closeModal();
     render();
     exportReceiptImage(`คูปองประชารัฐ_${c.name}`, buildPrachanatCouponHtml(c.name, amt, cards, note, staffName), 420);
+  });
+}
+
+// tap the 🪪 next to a customer's name (renderCustomerCard) to see their full ประชารัฐ tap history —
+// covers both customers with a live balance AND ones who used to but no longer have credit banked
+// (log entries persist through redemption, see openAddPrachanatCreditPrompt's comment). Each entry
+// is editable/deletable here for the day the government eventually revokes/changes someone's
+// eligibility and old records need correcting — deliberately does NOT touch the spendable
+// prachanatCredit balance itself (that's adjusted separately via the customer edit form) since not
+// every log entry represents banked credit (same-day "จ่ายตอนนี้เลย" taps never touched the balance).
+function openPrachanatHistoryModal(customerId){
+  const c = state.customers.find(x=>x.id===customerId);
+  if(!c) return;
+  const log = [...(c.prachanatCreditLog||[])].sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  const totalTimes = log.reduce((a,l)=>a+Number(l.times||1),0);
+  const totalAmount = log.reduce((a,l)=>a+Number(l.amount||0),0);
+  const body = `
+    <h3>🪪 ประวัติบัตรประชารัฐ — ${escapeHtml(c.name)}</h3>
+    <div class="field"><label>เครดิตคงเหลือตอนนี้</label>
+      <div class="mono" style="font-size:18px;color:var(--green);">฿${fmtMoney(c.prachanatCredit||0)}</div>
+      <div class="rem-meta" style="margin-top:4px;">รวมประวัติ: กด ${totalTimes} ครั้ง ฿${fmtMoney(totalAmount)}</div>
+    </div>
+    <div class="rem-meta" style="margin:10px 0;">แตะ "แก้ไข" ถ้าต้องแก้ไขรายการเก่า หรือ "ลบ" ถ้ารายการนี้ผิด/ถูกยกเลิกสิทธิ์ — การแก้ไข/ลบตรงนี้แก้แค่ประวัติ ไม่กระทบยอดเครดิตคงเหลือด้านบน (ถ้าต้องปรับยอดคงเหลือด้วย ให้ไปแก้ที่หน้าโปรไฟล์ลูกค้า)</div>
+    ${log.length? log.map(l=>`
+      <div class="card" style="padding:10px 14px;margin-bottom:6px;">
+        <div style="display:flex;justify-content:space-between;gap:8px;">
+          <div>
+            <div style="font-weight:600;">฿${fmtMoney(l.amount)} ${l.times>1? `(×${l.times})`:''}</div>
+            <div class="rem-meta">${fmtDateShort(l.date)}${l.staffName? ' · '+escapeHtml(l.staffName):''}</div>
+            ${l.note? `<div class="rem-meta">📝 ${escapeHtml(l.note)}</div>`:''}
+          </div>
+          <div class="btnrow" style="align-items:flex-start;">
+            <button type="button" class="btn ghost small" data-edit-prachanat-log="${l.id}">แก้ไข</button>
+            <button type="button" class="btn danger small" data-del-prachanat-log="${l.id}">ลบ</button>
+          </div>
+        </div>
+      </div>`).join('') : '<div class="empty">ยังไม่มีประวัติการใช้บัตรประชารัฐ</div>'}
+    <div class="btnrow" style="margin-top:12px;">
+      <button type="button" class="btn ghost" id="cancelModal">ปิด</button>
+    </div>
+  `;
+  showModal(body);
+  document.querySelectorAll('[data-edit-prachanat-log]').forEach(b=>b.addEventListener('click', ()=>{
+    openEditPrachanatLogEntry(customerId, b.dataset.editPrachanatLog);
+  }));
+  document.querySelectorAll('[data-del-prachanat-log]').forEach(b=>b.addEventListener('click', ()=>{
+    if(!confirm('ลบรายการประวัตินี้ใช่หรือไม่? (ไม่กระทบยอดเครดิตคงเหลือ)')) return;
+    adjustCustomerRemote(customerId, fresh=>{
+      const updated = cloneCustomerForEdit(fresh);
+      updated.prachanatCreditLog = (updated.prachanatCreditLog||[]).filter(x=>x.id!==b.dataset.delPrachanatLog);
+      return updated;
+    }).then(()=>{ render(); openPrachanatHistoryModal(customerId); });
+  }));
+}
+function openEditPrachanatLogEntry(customerId, entryId){
+  const c = state.customers.find(x=>x.id===customerId);
+  if(!c) return;
+  const entry = (c.prachanatCreditLog||[]).find(x=>x.id===entryId);
+  if(!entry) return;
+  const body = `
+    <h3>แก้ไขประวัติบัตรประชารัฐ</h3>
+    <form class="panel" id="editPrachanatLogForm" novalidate>
+      <div class="field"><label>วันที่</label><input type="date" id="f_logDate" value="${entry.date||todayISO()}"></div>
+      <div class="field"><label>จำนวนเงิน (บาท)</label><input type="text" inputmode="decimal" min="0" step="1" id="f_logAmount" value="${Number(entry.amount||0)}"></div>
+      <div class="field"><label>จำนวนครั้ง/บัตร</label><input type="text" inputmode="decimal" min="1" step="1" id="f_logTimes" value="${Number(entry.times||1)}"></div>
+      <div class="field"><label>หมายเหตุ</label><input id="f_logNote" value="${escapeAttr(entry.note||'')}"></div>
+      <div class="btnrow">
+        <button type="submit" class="btn primary">บันทึกการแก้ไข</button>
+        <button type="button" class="btn ghost" id="cancelModal">ยกเลิก</button>
+      </div>
+    </form>
+  `;
+  showModal(body);
+  document.getElementById('editPrachanatLogForm').addEventListener('submit', e=>{
+    e.preventDefault();
+    const newDate = document.getElementById('f_logDate').value || entry.date;
+    const newAmount = Number(document.getElementById('f_logAmount').value)||0;
+    const newTimes = Math.max(1, Number(document.getElementById('f_logTimes').value)||1);
+    const newNote = document.getElementById('f_logNote').value.trim();
+    adjustCustomerRemote(customerId, fresh=>{
+      const updated = cloneCustomerForEdit(fresh);
+      updated.prachanatCreditLog = (updated.prachanatCreditLog||[]).map(x=> x.id===entryId? {...x, date:newDate, amount:newAmount, times:newTimes, note:newNote} : x);
+      return updated;
+    }).then(()=>{ render(); openPrachanatHistoryModal(customerId); });
   });
 }
 
@@ -5768,6 +5853,7 @@ function attachHandlers(){
   document.querySelectorAll('[data-add-debt]').forEach(b=>b.addEventListener('click', ()=>openAddDebtPrompt(b.dataset.addDebt)));
   document.querySelectorAll('[data-add-credit]').forEach(b=>b.addEventListener('click', ()=>openAddThaiChuayCreditPrompt(b.dataset.addCredit)));
   document.querySelectorAll('[data-add-prachanat-credit]').forEach(b=>b.addEventListener('click', ()=>openAddPrachanatCreditPrompt(b.dataset.addPrachanatCredit)));
+  document.querySelectorAll('[data-open-prachanat-history]').forEach(b=>b.addEventListener('click', ()=>openPrachanatHistoryModal(b.dataset.openPrachanatHistory)));
   document.querySelectorAll('[data-reconcile-credit]').forEach(b=>b.addEventListener('click', ()=>openReconcileThaiChuayPrompt(b.dataset.reconcileCredit)));
   document.querySelectorAll('[data-reorder-cust]').forEach(b=>b.addEventListener('click', ()=>openSaleForm(b.dataset.reorderCust)));
   document.querySelectorAll('[data-edit-sale]').forEach(b=>b.addEventListener('click', ()=>openSaleForm(undefined, b.dataset.editSale)));
