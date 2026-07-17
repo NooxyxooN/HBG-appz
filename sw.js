@@ -3,7 +3,7 @@
 // Everything else — Firestore reads/writes, Google Fonts, CDN scripts (Chart.js, html2canvas,
 // qrcodejs), share-sheet uploads — is left alone and always goes straight to the network, so
 // live data always stays live and nothing gets accidentally frozen in a stale cache.
-const CACHE_NAME = 'hbg-shell-v1';
+const CACHE_NAME = 'hbg-shell-v2';
 const SHELL_FILES = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', event => {
