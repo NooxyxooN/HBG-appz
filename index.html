@@ -409,7 +409,7 @@ const DEFAULT_OTHER_PRODUCTS = [
   { id:'op_stove_double', name:'เตาคู่', price:0, cost:0, unit:'ชิ้น' },
   { id:'op_igniter', name:'ปืนยิงแก๊ส', price:0, cost:0, unit:'ชิ้น' }
 ];
-let state = { customers: [], sales: [], reminders: [], tasks: [], purchases: [], transactions: [], gasPrices: {4:0,7:0,15:0,48:0}, pickupDiscount: {4:10,7:10,15:20,48:20}, inventory: emptyInventory(), dailySummaries: {}, otherProducts: [], truckStock: [], inventoryAdjustments: [], shopCoord: null, loaded:false };
+let state = { customers: [], sales: [], reminders: [], tasks: [], purchases: [], transactions: [], gasPrices: {4:0,7:0,15:0,48:0}, pickupDiscount: {4:10,7:10,15:20,48:20}, inventory: emptyInventory(), dailySummaries: {}, otherProducts: [], truckStock: [], inventoryAdjustments: [], shopCoord: null, dailyNotes: {}, loaded:false };
 let currentTab = 'dashboard';
 let salesPeriod = 'day';
 let salesViewDate = todayISO();
@@ -644,6 +644,7 @@ async function init(){
   state.truckStock = await loadData('truckStock', []);
   state.inventoryAdjustments = await loadData('inventoryAdjustments', []);
   state.shopCoord = await loadData('shopCoord', null);
+  state.dailyNotes = await loadData('dailyNotes', {});
   migrateNumericSoiMoo();
   migrateAddNewDefaultProducts();
   migrateTruckStockShape();
@@ -678,6 +679,7 @@ async function init(){
     window.fbListen('truckStock', items=>{ if(items){ state.truckStock = items; render(); } });
     window.fbListen('inventoryAdjustments', items=>{ if(items){ state.inventoryAdjustments = items; render(); } });
     window.fbListen('shopCoord', item=>{ if(item){ state.shopCoord = item; render(); } });
+    window.fbListen('dailyNotes', items=>{ if(items){ state.dailyNotes = items; render(); } });
   }catch(e){ console.error('realtime listener setup failed', e); }
 }
 
@@ -772,6 +774,7 @@ function persistPickupDiscount(){ saveData('pickupDiscount', state.pickupDiscoun
 function persistInventory(){ saveData('inventory', state.inventory); }
 function persistInventoryAdjustments(){ saveData('inventoryAdjustments', state.inventoryAdjustments); }
 function persistShopCoord(){ saveData('shopCoord', state.shopCoord); }
+function persistDailyNotes(){ saveData('dailyNotes', state.dailyNotes); }
 function persistDailySummaries(){ saveData('dailySummaries', state.dailySummaries); }
 function persistOtherProducts(){ saveData('otherProducts', state.otherProducts); }
 function persistTruckStock(){ saveData('truckStock', state.truckStock); }
@@ -1579,6 +1582,21 @@ function renderDashboard(){
 
   const dailySummaryButtonRow = `<div class="btnrow" style="margin-bottom:12px;"><button class="btn ghost small" id="openDailySummaryBtn">📋 สรุปผลประจำวัน (อัตโนมัติตั้งแต่ 00:00 น.)</button></div>`;
 
+  // free-text scratchpad for the shop, one entry per date — for anything worth remembering that
+  // doesn't fit the structured data (sales/tasks/debts) elsewhere in the app, e.g. "วันนี้แก๊สขาดตลาด
+  // ราคาขึ้น" or "ลูกค้าโทรมาต่อว่าเรื่องส่งช้า". Kept dead simple: one textarea per day, autosaves
+  // on blur, with a history modal to look back at (and edit/delete) past days' notes.
+  const todayNoteText = state.dailyNotes[todayISO()] || '';
+  const dailyNoteCard = `
+    <div class="stamp-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <div style="font-weight:700;">📝 บันทึกประจำวันของร้าน</div>
+        <button class="btn ghost small" id="viewDailyNotesHistoryBtn">📜 ย้อนหลัง</button>
+      </div>
+      <textarea id="dailyNoteInput" rows="3" placeholder="จดอะไรก็ได้ที่อยากจำไว้วันนี้ เช่น เหตุการณ์พิเศษ ของขาด ลูกค้าฝากข้อความ ฯลฯ">${escapeHtml(todayNoteText)}</textarea>
+      <div class="rem-meta" style="margin-top:6px;">แตะที่อื่นหลังพิมพ์เพื่อบันทึกอัตโนมัติ</div>
+    </div>`;
+
   const plCard = `
     <div class="stamp-card">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
@@ -1706,6 +1724,7 @@ function renderDashboard(){
 
   return `
     ${dailySummaryButtonRow}
+    ${dailyNoteCard}
     ${plCard}
     ${priceCard}
     ${otherProductsCard}
@@ -2001,6 +2020,57 @@ function openInventoryAdjustmentHistoryModal(){
     </div>
   `;
   showModal(body);
+}
+
+// list of past days' บันทึกประจำวัน (today's own entry is edited directly on the dashboard card —
+// this modal is for looking back at / correcting / clearing old ones)
+function openDailyNotesHistoryModal(){
+  const today = todayISO();
+  const dates = Object.keys(state.dailyNotes||{}).filter(d=>d!==today && (state.dailyNotes[d]||'').trim()).sort((a,b)=>b.localeCompare(a));
+  const body = `
+    <h3>📜 บันทึกประจำวันย้อนหลัง</h3>
+    ${dates.length? dates.map(d=>`
+      <div class="card" style="padding:10px 14px;margin-bottom:6px;cursor:pointer;" data-edit-daily-note="${d}">
+        <div style="font-weight:700;margin-bottom:4px;">${fmtDateShort(d)}</div>
+        <div class="rem-meta" style="white-space:pre-wrap;">${escapeHtml(state.dailyNotes[d])}</div>
+      </div>`).join('') : '<div class="empty">ยังไม่มีบันทึกย้อนหลัง</div>'}
+    <div class="btnrow" style="margin-top:12px;">
+      <button type="button" class="btn ghost" id="cancelModal">ปิด</button>
+    </div>
+  `;
+  showModal(body);
+  document.querySelectorAll('[data-edit-daily-note]').forEach(el=>el.addEventListener('click', ()=>openEditDailyNoteEntry(el.dataset.editDailyNote)));
+}
+function openEditDailyNoteEntry(dateStr){
+  const body = `
+    <h3>📝 บันทึกวันที่ ${fmtDateShort(dateStr)}</h3>
+    <form class="panel" id="editDailyNoteForm" novalidate>
+      <div class="field"><textarea id="f_editDailyNote" rows="5">${escapeHtml(state.dailyNotes[dateStr]||'')}</textarea></div>
+      <div class="btnrow">
+        <button type="submit" class="btn primary">บันทึก</button>
+        <button type="button" class="btn danger" id="deleteDailyNoteBtn">ลบ</button>
+        <button type="button" class="btn ghost" id="cancelModal">ยกเลิก</button>
+      </div>
+    </form>
+  `;
+  showModal(body);
+  document.getElementById('editDailyNoteForm').addEventListener('submit', e=>{
+    e.preventDefault();
+    const val = document.getElementById('f_editDailyNote').value.trim();
+    if(val) state.dailyNotes[dateStr] = val;
+    else delete state.dailyNotes[dateStr];
+    persistDailyNotes();
+    closeModal();
+    openDailyNotesHistoryModal();
+  });
+  document.getElementById('deleteDailyNoteBtn').addEventListener('click', ()=>{
+    if(confirm('ลบบันทึกวันนี้ใช่หรือไม่?')){
+      delete state.dailyNotes[dateStr];
+      persistDailyNotes();
+      closeModal();
+      openDailyNotesHistoryModal();
+    }
+  });
 }
 
 // shared stat grid used by both the main (today) view and the per-day history detail view — the
@@ -6074,6 +6144,16 @@ function attachHandlers(){
   if(addTransactionBtn) addTransactionBtn.addEventListener('click', ()=>openTransactionForm());
   const openDailySummaryBtn = document.getElementById('openDailySummaryBtn');
   if(openDailySummaryBtn) openDailySummaryBtn.addEventListener('click', openDailySummaryModal);
+  const dailyNoteInput = document.getElementById('dailyNoteInput');
+  if(dailyNoteInput) dailyNoteInput.addEventListener('blur', ()=>{
+    const val = dailyNoteInput.value.trim();
+    const today = todayISO();
+    if(val) state.dailyNotes[today] = val;
+    else delete state.dailyNotes[today];
+    persistDailyNotes();
+  });
+  const viewDailyNotesHistoryBtn = document.getElementById('viewDailyNotesHistoryBtn');
+  if(viewDailyNotesHistoryBtn) viewDailyNotesHistoryBtn.addEventListener('click', openDailyNotesHistoryModal);
   document.querySelectorAll('[data-show-pl]').forEach(el=>el.addEventListener('click', ()=>{
     // open the detail modal already set to whichever period the dashboard card is currently showing
     plDetailPeriod = dashboardPLPeriod;
