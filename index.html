@@ -4779,25 +4779,98 @@ function openRoutePlotModal(){
     if(coord){
       const dist = haversineKm(ref, coord);
       const bearing = bearingDeg(ref, coord);
-      stops.push({ t, name, dist, bearing, urgency: getTaskUrgencyState(t), navLink: mapsUrl(address) });
+      const soi = cust? cust.soi : t.soi;
+      const moo = cust? cust.moo : t.moo;
+      const landmark = cust? cust.landmark : t.landmark;
+      stops.push({ t, name, dist, bearing, coord, soi, moo, landmark, urgency: getTaskUrgencyState(t), navLink: mapsUrl(address) });
     } else {
       noCoordStops.push({ t, name });
     }
   });
-  stops.sort((a,b)=>a.dist-b.dist);
-  // same number shown on the plot circle gets carried onto the list below, so a driver can match
-  // "จุดที่ 3" in the list back to the right dot on the SVG at a glance
-  stops.forEach((s,i)=>{ s.num = i+1; });
   const maxDist = Math.max(1, ...stops.map(s=>s.dist));
   const R = 128; // plot radius in svg units, center at (150,150)
   const urgencyColor = { red:'#B23A2E', yellow:'#D8A32C', green:'#3F8F5B', paused:'#7A8BA0' };
-  const points = stops.map((s,i)=>{
+  // GROUP BY REAL PLACE, NOT COMPASS ANGLE: with hundreds of stops packed into distinct village
+  // clusters (not spread evenly by direction), an 8-way compass split lumps unrelated villages
+  // that merely happen to share a bearing from the shop. Instead, union-find stops that share the
+  // same non-empty ซอย, หมู่, or จุดสังเกต into one cluster — any single shared field is enough to
+  // merge two stops (and merges chain transitively: if A~B share a หมู่ and B~C share a ซอย, A/B/C
+  // all end up in one cluster) — since a shared street/village name is a far more reliable "these
+  // are neighbors" signal than raw GPS distance in rural/hilly terrain. Stops with none of these
+  // fields in common with anyone else just become their own single-stop cluster.
+  function buildStopClusters(list){
+    const n = list.length;
+    const parent = Array.from({length:n}, (_,i)=>i);
+    function find(i){ while(parent[i]!==i){ parent[i]=parent[parent[i]]; i=parent[i]; } return i; }
+    function union(i,j){ const ri=find(i), rj=find(j); if(ri!==rj) parent[ri]=rj; }
+    for(let i=0;i<n;i++){
+      for(let j=i+1;j<n;j++){
+        const a=list[i], b=list[j];
+        if((a.landmark && b.landmark && a.landmark===b.landmark) ||
+           (a.soi && b.soi && a.soi===b.soi) ||
+           (a.moo && b.moo && a.moo===b.moo)) union(i,j);
+      }
+    }
+    const groups = {};
+    list.forEach((s,i)=>{ const r=find(i); if(!groups[r]) groups[r]=[]; groups[r].push(s); });
+    return Object.values(groups);
+  }
+  // within a cluster (or when there's only ever one stop in it), still walk a greedy nearest-neighbor
+  // chain rather than raw distance-from-shop order — closest-to-current-stop, not closest-to-shop
+  function orderZoneNearestNeighbor(zoneStops, startCoord){
+    const remaining = [...zoneStops];
+    const ordered = [];
+    let curCoord = startCoord, curSoi = null, curMoo = null, curLandmark = null;
+    while(remaining.length){
+      let bestIdx = 0, bestScore = Infinity;
+      remaining.forEach((s,i)=>{
+        let score = haversineKm(curCoord, s.coord);
+        if(curLandmark && s.landmark && curLandmark===s.landmark) score -= 1.5;
+        else if(curSoi && s.soi && curSoi===s.soi) score -= 1;
+        else if(curMoo && s.moo && curMoo===s.moo) score -= 0.3;
+        if(score < bestScore){ bestScore = score; bestIdx = i; }
+      });
+      const next = remaining.splice(bestIdx,1)[0];
+      ordered.push(next);
+      curCoord = next.coord; curSoi = next.soi; curMoo = next.moo; curLandmark = next.landmark;
+    }
+    return ordered;
+  }
+  // labels a cluster using whichever field (จุดสังเกต > หมู่ > ซอย) shows up most often among its
+  // members, so the zone header reads like a real place ("🏠 บ้านสีฟ้า ตรงข้ามวัด") instead of a
+  // compass direction — falls back to the compass sector only for lone stops with no field filled in
+  function pickModeValue(list, field){
+    const tally = {};
+    list.forEach(s=>{ if(s[field]) tally[s[field]] = (tally[s[field]]||0)+1; });
+    let best=null, bestCount=0;
+    Object.entries(tally).forEach(([v,c])=>{ if(c>bestCount){ best=v; bestCount=c; } });
+    return best;
+  }
+  function clusterLabel(clusterStops){
+    const landmark = pickModeValue(clusterStops,'landmark');
+    if(landmark) return `🏠 ${landmark}`;
+    const moo = pickModeValue(clusterStops,'moo');
+    if(moo) return `หมู่ ${moo}`;
+    const soi = pickModeValue(clusterStops,'soi');
+    if(soi) return `ซอย ${soi}`;
+    return `🧭 ทิศ${bearingToSector(clusterStops[0].bearing)}`;
+  }
+  const clusterObjs = buildStopClusters(stops).map(clusterStops=>{
+    const ordered = orderZoneNearestNeighbor(clusterStops, ref);
+    return { stops: ordered, minDist: Math.min(...clusterStops.map(s=>s.dist)), label: clusterLabel(clusterStops) };
+  });
+  // visit closest cluster first — same number shown on the plot circle carries onto the list below,
+  // so a driver can match "จุดที่ 3" in the list back to the right dot on the SVG at a glance
+  clusterObjs.sort((a,b)=>a.minDist-b.minDist);
+  let visitNum = 0;
+  clusterObjs.forEach(c=>{ c.stops.forEach(s=>{ s.num = ++visitNum; }); });
+  const points = stops.map(s=>{
     const r = (s.dist/maxDist) * R;
     const rad = s.bearing * Math.PI/180;
     const x = 150 + r*Math.sin(rad);
     const y = 150 - r*Math.cos(rad);
     return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="7" fill="${urgencyColor[s.urgency]||'#888'}" stroke="#fff" stroke-width="1.5"><title>${escapeAttr(s.name)} — ${s.dist.toFixed(1)} กม.</title></circle>
-      <text x="${x.toFixed(1)}" y="${(y-11).toFixed(1)}" font-size="9" text-anchor="middle" fill="#333">${i+1}</text>`;
+      <text x="${x.toFixed(1)}" y="${(y-11).toFixed(1)}" font-size="9" text-anchor="middle" fill="#333">${s.num}</text>`;
   }).join('');
   const ringRadii = [R*0.33, R*0.66, R];
   const rings = ringRadii.map(r=>`<circle cx="150" cy="150" r="${r.toFixed(1)}" fill="none" stroke="#ddd" stroke-width="1"></circle>
@@ -4812,18 +4885,9 @@ function openRoutePlotModal(){
     <text x="150" y="168" font-size="9" text-anchor="middle" fill="#333">${refLabel}</text>
     ${points}
   </svg>`;
-  // group by 8-point compass sector, sorted nearest-first within each sector, so the list directly
-  // answers "which direction should I head first" — pair with the plot above for a visual double-check
-  const bySector = {};
-  stops.forEach(s=>{
-    const sector = bearingToSector(s.bearing);
-    if(!bySector[sector]) bySector[sector] = [];
-    bySector[sector].push(s);
-  });
-  const sectorOrder = COMPASS_SECTORS.filter(s=>bySector[s]);
-  const listHtml = sectorOrder.map(sector=>`
-    <div class="rem-meta" style="font-weight:700;margin:10px 0 4px;">🧭 ทิศ${sector} (${bySector[sector].length} ราย)</div>
-    ${bySector[sector].map(s=>`
+  const listHtml = clusterObjs.map(c=>`
+    <div class="rem-meta" style="font-weight:700;margin:10px 0 4px;">${escapeHtml(c.label)} (${c.stops.length} ราย)</div>
+    ${c.stops.map(s=>`
       <div class="card" style="padding:8px 12px;margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;gap:8px;">
         <div>${getTaskUrgencyIcon(s.urgency)} <b>${s.num}. ${escapeHtml(s.name)}</b> <span class="rem-meta">~${s.dist.toFixed(1)} กม.</span></div>
         ${s.navLink? `<a class="btn ghost small" href="${s.navLink}" target="_blank" rel="noopener" style="text-decoration:none;flex-shrink:0;">🧭</a>` : ''}
