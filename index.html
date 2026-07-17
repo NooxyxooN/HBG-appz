@@ -409,7 +409,7 @@ const DEFAULT_OTHER_PRODUCTS = [
   { id:'op_stove_double', name:'เตาคู่', price:0, cost:0, unit:'ชิ้น' },
   { id:'op_igniter', name:'ปืนยิงแก๊ส', price:0, cost:0, unit:'ชิ้น' }
 ];
-let state = { customers: [], sales: [], reminders: [], tasks: [], purchases: [], transactions: [], gasPrices: {4:0,7:0,15:0,48:0}, pickupDiscount: {4:10,7:10,15:20,48:20}, inventory: emptyInventory(), dailySummaries: {}, otherProducts: [], truckStock: [], inventoryAdjustments: [], loaded:false };
+let state = { customers: [], sales: [], reminders: [], tasks: [], purchases: [], transactions: [], gasPrices: {4:0,7:0,15:0,48:0}, pickupDiscount: {4:10,7:10,15:20,48:20}, inventory: emptyInventory(), dailySummaries: {}, otherProducts: [], truckStock: [], inventoryAdjustments: [], shopCoord: null, loaded:false };
 let currentTab = 'dashboard';
 let salesPeriod = 'day';
 let salesViewDate = todayISO();
@@ -444,6 +444,42 @@ function extractLatLngFromMapsUrl(url){
   if(d3 && d4) return `${d3[1]},${d4[1]}`;
   return null;
 }
+// returns {lat,lng} if this address is a pasted Google Maps link with an extractable coordinate,
+// or if it's literally just "lat,lng" text — otherwise null (plain text addresses like "หลังวัด...
+// ซอย 3" have no coordinate, so those stops just won't be plottable on the route sketch)
+function coordFromAddress(addr){
+  if(!addr) return null;
+  const direct = addr.trim().match(/^(-?\d+\.\d+),\s*(-?\d+\.\d+)$/);
+  if(direct) return { lat: Number(direct[1]), lng: Number(direct[2]) };
+  const extracted = extractLatLngFromMapsUrl(addr);
+  if(extracted){
+    const [lat, lng] = extracted.split(',').map(Number);
+    return { lat, lng };
+  }
+  return null;
+}
+// haversine straight-line distance in km — an estimate, not a driving distance, but enough to
+// answer "roughly how far, and which direction" without needing turn-by-turn routing/map tiles
+function haversineKm(a, b){
+  const R = 6371;
+  const dLat = (b.lat-a.lat) * Math.PI/180;
+  const dLng = (b.lng-a.lng) * Math.PI/180;
+  const lat1 = a.lat * Math.PI/180, lat2 = b.lat * Math.PI/180;
+  const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLng/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1-h));
+}
+// compass bearing in degrees (0=north, 90=east, ...) from point a to point b
+function bearingDeg(a, b){
+  const lat1 = a.lat * Math.PI/180, lat2 = b.lat * Math.PI/180;
+  const dLng = (b.lng-a.lng) * Math.PI/180;
+  const y = Math.sin(dLng) * Math.cos(lat2);
+  const x = Math.cos(lat1)*Math.sin(lat2) - Math.sin(lat1)*Math.cos(lat2)*Math.cos(dLng);
+  return (Math.atan2(y, x) * 180/Math.PI + 360) % 360;
+}
+const COMPASS_SECTORS = ['เหนือ','ตะวันออกเฉียงเหนือ','ตะวันออก','ตะวันออกเฉียงใต้','ใต้','ตะวันตกเฉียงใต้','ตะวันตก','ตะวันตกเฉียงเหนือ'];
+function bearingToSector(deg){
+  return COMPASS_SECTORS[Math.round(deg/45) % 8];
+}
 let expandedMapIds = new Set();
 let openReminderMenuIds = new Set();
 let dashboardSort = 'recent';
@@ -453,6 +489,11 @@ let customersSort = 'name';
 let debtorsSort = 'total';
 let rankSort = 'gas';
 let tasksSort = 'urgency';
+// ephemeral GPS snapshot of the truck's position "right now" — deliberately NOT persisted to
+// Firestore, since it only answers "how far/which way from where I'm standing this instant", not
+// a fixed reference point like the shop. Resets whenever the app is reloaded, which is fine.
+let truckPinCoord = null;
+let routePlotUseTruckPin = false;
 let purchasesSort = 'date';
 let purchasesArchiveOpen = false;
 let pendingCreditListOpen = false;
@@ -577,13 +618,15 @@ function customerTierIconHtml(customerId){
 }
 const CUSTOMER_TIER_LABELS = { new:'🆕 ลูกค้าใหม่', diamond:'👑 เพชร', inactive:'👤 หายไปนาน', regular:'👤 ทั่วไป' };
 
-// customers whose predicted next order falls within `withinDays` (including already-overdue ones),
-// sorted most-overdue first — feeds the "ใกล้ถึงรอบส่งแล้ว" dashboard section
-function getUpcomingReorderCustomers(withinDays){
-  return state.customers
-    .map(c=>({ c, cycle: getCustomerCycleInfo(c.id) }))
-    .filter(x=>x.cycle && x.cycle.isRegular && x.cycle.daysUntilNext <= withinDays)
-    .sort((a,b)=>a.cycle.daysUntilNext - b.cycle.daysUntilNext);
+// plain "when did they last actually order gas" fact — no averaging/forecasting, per user's
+// request to drop the cycle-prediction math ("อยากรู้ว่าแค่ว่า สั่งล่าสุดเมื่อไหร่ แค่นั้นก็พอ").
+// Shown on every customer card (Customers tab) rather than a separate curated dashboard list.
+function getCustomerLastOrder(customerId){
+  const dates = state.sales.filter(s=>s.customerId===customerId && Number(s.gasQty||0)>0).map(s=>s.date);
+  if(!dates.length) return null;
+  const lastDate = dates.reduce((max,d)=> d>max? d : max, dates[0]);
+  const daysSinceLast = Math.round((Date.now() - Date.parse(lastDate)) / 86400000);
+  return { lastDate, daysSinceLast };
 }
 
 async function init(){
@@ -600,6 +643,7 @@ async function init(){
   state.otherProducts = await loadData('otherProducts', DEFAULT_OTHER_PRODUCTS);
   state.truckStock = await loadData('truckStock', []);
   state.inventoryAdjustments = await loadData('inventoryAdjustments', []);
+  state.shopCoord = await loadData('shopCoord', null);
   migrateNumericSoiMoo();
   migrateAddNewDefaultProducts();
   migrateTruckStockShape();
@@ -633,6 +677,7 @@ async function init(){
     window.fbListen('otherProducts', items=>{ if(items){ state.otherProducts = items; render(); } });
     window.fbListen('truckStock', items=>{ if(items){ state.truckStock = items; render(); } });
     window.fbListen('inventoryAdjustments', items=>{ if(items){ state.inventoryAdjustments = items; render(); } });
+    window.fbListen('shopCoord', item=>{ if(item){ state.shopCoord = item; render(); } });
   }catch(e){ console.error('realtime listener setup failed', e); }
 }
 
@@ -726,6 +771,7 @@ function persistTransactions(){ saveData('transactions', state.transactions); }
 function persistPickupDiscount(){ saveData('pickupDiscount', state.pickupDiscount); }
 function persistInventory(){ saveData('inventory', state.inventory); }
 function persistInventoryAdjustments(){ saveData('inventoryAdjustments', state.inventoryAdjustments); }
+function persistShopCoord(){ saveData('shopCoord', state.shopCoord); }
 function persistDailySummaries(){ saveData('dailySummaries', state.dailySummaries); }
 function persistOtherProducts(){ saveData('otherProducts', state.otherProducts); }
 function persistTruckStock(){ saveData('truckStock', state.truckStock); }
@@ -1510,9 +1556,6 @@ function renderDashboard(){
   });
   const totalShopStock = shopStockByBrand.regular + shopStockByBrand.ptt;
   const upcoming = getUpcomingReminders(3);
-  // customers whose predicted delivery cycle says they're due (or overdue) within 2 days — stays
-  // empty until enough order history builds up per customer (needs 3+ real deliveries to guess)
-  const upcomingReorders = getUpcomingReorderCustomers(2);
   // customers sitting on a banked ไทยช่วยไทย/บัตรประชารัฐ credit they haven't used yet — surfaced
   // here regardless of reorder-cycle prediction status, since these are often first-time/irregular
   // orderers who tapped their credit before ever actually buying gas
@@ -1667,18 +1710,6 @@ function renderDashboard(){
     ${priceCard}
     ${otherProductsCard}
     ${purchaseCard}
-    ${upcomingReorders.length? `
-    <h2 class="section-title">🔁 ใกล้ถึงรอบส่งแล้ว (คาดการณ์จากประวัติสั่งซื้อ)</h2>
-    ${upcomingReorders.map(({c, cycle})=>`
-      <div class="card" data-edit-cust="${c.id}" style="cursor:pointer;">
-        <div style="display:flex;justify-content:space-between;align-items:center;">
-          <div style="font-weight:700;">👤 ${escapeHtml(c.name)}</div>
-          <span class="tag ${cycle.daysUntilNext<0? 'debt':'gas'}">${cycle.daysUntilNext<0? `เลยรอบมา ${Math.abs(cycle.daysUntilNext)} วัน` : cycle.daysUntilNext===0? 'ถึงรอบวันนี้' : `อีก ${cycle.daysUntilNext} วัน`}</span>
-        </div>
-        <div class="rem-meta" style="margin-top:4px;">สั่งเฉลี่ยทุก ~${cycle.avgDays} วัน · ล่าสุด ${fmtDateShort(cycle.lastDate)}</div>
-        ${Number(c.thaiChuayCredit||0)>0 || Number(c.prachanatCredit||0)>0? `<div class="btnrow" style="margin-top:6px;">${Number(c.thaiChuayCredit||0)>0? `<span class="tag paid">🎫 ฿${fmtMoney(c.thaiChuayCredit)}</span>`:''}${Number(c.prachanatCredit||0)>0? `<span class="tag paid">🪪 ฿${fmtMoney(c.prachanatCredit)}</span>`:''}</div>` : ''}
-      </div>`).join('')}
-    ` : ''}
     ${pendingCreditCustomers.length? (()=>{
       const totalThaiChuay = pendingCreditCustomers.reduce((s,c)=>s+Number(c.thaiChuayCredit||0),0);
       const totalPrachanat = pendingCreditCustomers.reduce((s,c)=>s+Number(c.prachanatCredit||0),0);
@@ -2716,7 +2747,6 @@ function renderCustomerCard(c, opts){
   const isMapExpanded = expandedMapIds.has(c.id);
   const isHistoryExpanded = expandedHistoryIds.has(c.id);
   const stats = isHistoryExpanded ? getCustomerStats(c.id) : null;
-  const cycle = isHistoryExpanded ? getCustomerCycleInfo(c.id) : null;
   const hasEverUsedPrachanat = Number(c.prachanatCredit||0)>0 || (c.prachanatCreditLog||[]).length>0;
   return `
   <div class="card">
@@ -2725,6 +2755,7 @@ function renderCustomerCard(c, opts){
       <span>${c.phone? '📞 '+escapeHtml(c.phone) : ''}</span>
       ${link? `<a class="maps-link" href="${link}" target="_blank" rel="noopener">🧭 นำทาง</a>` : ''}
     </div>
+    <div class="rem-meta" style="margin-top:2px;">${(()=>{ const lo = getCustomerLastOrder(c.id); return lo? `สั่งล่าสุด ${fmtDateShort(lo.lastDate)} (${lo.daysSinceLast===0? 'วันนี้' : lo.daysSinceLast+' วันก่อน'})` : 'ยังไม่เคยสั่ง'; })()}</div>
     <div class="btnrow">
       ${Number(c.gasCylinders||0)>0? `<span class="tag gas">${gasBrandIconsHtml(c.gasCylindersBreakdown, 16) || '🛢️'} ยืมถัง ${c.gasCylinders} ใบ</span>`:''}
       ${Number(c.debt||0)>0? `<span class="tag debt">ค้างชำระ ฿${fmtMoney(c.debt)}</span>` : `<span class="tag paid">ไม่มีหนี้</span>`}
@@ -2758,7 +2789,6 @@ function renderCustomerCard(c, opts){
         <div class="stat"><div class="label">ยอดรวมทั้งหมด</div><div class="value sale">฿${fmtMoney(stats.totalAmount)}</div></div>
         <div class="stat"><div class="label">สั่งล่าสุด</div><div class="value" style="font-size:14px;">${stats.lastDate? fmtDateShort(stats.lastDate) : '-'}</div></div>
       </div>
-      ${cycle? `<div class="rem-meta" style="margin-bottom:8px;">🔁 สั่งเฉลี่ยทุก ~${cycle.avgDays} วัน (จาก ${cycle.ordersCount} ครั้งล่าสุด) — คาดว่าจะสั่งอีกครั้งประมาณ ${fmtDateShort(cycle.nextExpectedDate)}${cycle.daysUntilNext<0? ` (เลยรอบมา ${Math.abs(cycle.daysUntilNext)} วันแล้ว)` : cycle.daysUntilNext===0? ' (วันนี้)' : ` (อีก ${cycle.daysUntilNext} วัน)`}</div>` : ''}
       ${stats.orders.length? stats.orders.slice(0,8).map(o=>`<div class="rem-meta" style="margin-top:5px;cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px;" data-edit-history-sale="${o.id}" title="แตะเพื่อแก้ไขรายการนี้ (บางอันบันทึกผิดแก้ได้ตรงนี้)">${fmtDateShort(o.date)} — ฿${fmtMoney(o.amount)}${o.gasQty? ' · '+o.gasQty+' ถัง':''}${o.note? ' · '+escapeHtml(o.note):''}</div>`).join('') + '<div class="rem-meta" style="margin-top:6px;">✏️ แตะรายการด้านบนเพื่อแก้ไข ถ้าบันทึกผิด</div>' : '<div class="rem-meta">ยังไม่มีประวัติการสั่งซื้อ</div>'}
     </div>` : ''}
   </div>`;
@@ -4526,6 +4556,18 @@ function addToTruckStock(items){
   });
   persistTruckStock();
 }
+// used by "ตั้งเต็มตามยอดลูกค้าวันนี้" — sets (not adds) the FULL count per size/brand to match
+// today's aggregated customer order totals, so tapping it again after the task list changes
+// re-syncs to the current total instead of stacking on top of whatever was already there
+function setTruckStockFullFromCustomers(items){
+  state.truckStock = state.truckStock || [];
+  items.forEach(item=>{
+    let existing = state.truckStock.find(l=>l.size===item.size && l.brand===item.brand);
+    if(!existing){ existing = { size:item.size, brand:item.brand, full:0, empty:0 }; state.truckStock.push(existing); }
+    existing.full = item.qty;
+  });
+  persistTruckStock();
+}
 // mirrors applyDeliveryToInventory but for the truck's own on-board stock: a delivered full tank
 // leaves the truck's "full" count, and (unless the customer's empty is still pending pickup) comes
 // right back onto the truck as an "empty" — this is what fades that tank's icon to gray in the bar
@@ -4569,7 +4611,7 @@ function openTruckStockModal(){
       <button type="button" class="btn primary" id="truckAddBtn" style="margin-bottom:11px;">➕</button>
     </div>
     <div class="btnrow" style="margin-top:12px;">
-      <button type="button" class="btn ghost small" id="truckAddFromCustomersBtn">📋 เพิ่มตามยอดลูกค้าวันนี้ (${fmtMoney(custTotal)} ถัง)</button>
+      <button type="button" class="btn ghost small" id="truckAddFromCustomersBtn">📋 ตั้งเต็มตามยอดลูกค้าวันนี้ (${fmtMoney(custTotal)} ถัง)</button>
       <button type="button" class="btn danger small" id="truckClearBtn">🗑 ล้างทั้งหมด</button>
     </div>
     <div class="btnrow" style="margin-top:14px;">
@@ -4591,7 +4633,7 @@ function openTruckStockModal(){
   });
   document.getElementById('truckAddFromCustomersBtn').addEventListener('click', ()=>{
     if(!custBreakdown.length) return;
-    addToTruckStock(custBreakdown);
+    setTruckStockFullFromCustomers(custBreakdown);
     refreshTruckStockModal();
     render();
   });
@@ -4640,6 +4682,173 @@ function openTruckStockModal(){
       }
     }
   });
+}
+
+/* ---------------- OFFLINE ROUTE SKETCH ---------------- lets the driver see roughly which
+   direction/how far today's stops are from the shop WITHOUT needing real map tiles (which would be
+   way too heavy to bundle into a single-file app) — just plain geometry (haversine distance +
+   compass bearing) drawn as an SVG scatter plot, using coordinates already saved whenever someone
+   pasted a Google Maps link into a customer/task's address field (see coordFromAddress). ---------------- */
+function openSetShopCoordForm(){
+  const current = state.shopCoord? `${state.shopCoord.lat},${state.shopCoord.lng}` : '';
+  const body = `
+    <h3>📍 ตั้งพิกัดร้าน (ใช้ครั้งเดียว)</h3>
+    <div class="rem-meta" style="margin-bottom:10px;line-height:1.6;">เปิด Google Maps หาตำแหน่งร้านของตัวเอง แล้ววางลิงก์ หรือพิกัด "lat,lng" ตรงนี้ — ใช้เป็นจุดศูนย์กลางคำนวณทิศทาง/ระยะทางไปหาลูกค้าแต่ละราย</div>
+    <form class="panel" id="shopCoordForm" novalidate>
+      <div class="field"><label>ลิงก์ Google Maps หรือพิกัด (lat,lng)</label><input id="f_shopCoord" placeholder="เช่น https://maps.google.com/... หรือ 18.9,99.1" value="${escapeAttr(current)}"></div>
+      <div id="shopCoordError" class="rem-meta" style="color:var(--red);display:none;margin-top:4px;">อ่านพิกัดจากข้อความนี้ไม่ได้ ลองวางลิงก์ Google Maps แบบเต็ม หรือพิมพ์ตัวเลข "lat,lng" ตรงๆ</div>
+      <div class="btnrow">
+        <button type="submit" class="btn primary">บันทึก</button>
+        <button type="button" class="btn ghost" id="cancelModal">ยกเลิก</button>
+      </div>
+    </form>
+  `;
+  showModal(body);
+  document.getElementById('shopCoordForm').addEventListener('submit', e=>{
+    e.preventDefault();
+    const raw = document.getElementById('f_shopCoord').value.trim();
+    const coord = coordFromAddress(raw);
+    if(!coord){
+      document.getElementById('shopCoordError').style.display = 'block';
+      return;
+    }
+    state.shopCoord = coord;
+    persistShopCoord();
+    closeModal();
+    openRoutePlotModal();
+  });
+}
+// captures the truck's current GPS position (one-shot, no tracking/watch) and reopens the route
+// plot using that as the reference point instead of the fixed shop location — for "how far/which
+// way from HERE, right now" rather than "from the shop"
+function pinTruckLocationAndPlot(){
+  if(!navigator.geolocation){
+    alert('เบราว์เซอร์/อุปกรณ์นี้ไม่รองรับการหาตำแหน่งปัจจุบัน (GPS)');
+    return;
+  }
+  const btn = document.getElementById('routePlotPinAgainBtn') || document.getElementById('routePlotPinBtn') || document.getElementById('pinTruckLocationBtn');
+  const originalText = btn? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = '📍 กำลังหาตำแหน่ง...'; }
+  navigator.geolocation.getCurrentPosition(
+    pos=>{
+      truckPinCoord = { lat: pos.coords.latitude, lng: pos.coords.longitude, at: Date.now() };
+      routePlotUseTruckPin = true;
+      openRoutePlotModal();
+    },
+    ()=>{
+      if(btn){ btn.disabled = false; btn.textContent = originalText; }
+      alert('หาตำแหน่งรถตอนนี้ไม่ได้ — ลองเปิดสิทธิ์ตำแหน่งที่ตั้ง (Location) ให้เบราว์เซอร์ก่อน แล้วลองใหม่');
+    },
+    { enableHighAccuracy:true, timeout:10000, maximumAge:0 }
+  );
+}
+// pins the truck's current position (one-shot GPS) purely to power the "distance" sort chip in the
+// Tasks tab list — separate entry point from pinTruckLocationAndPlot (which also opens the SVG
+// plot) since sorting the list shouldn't force the modal open too
+function pinTruckLocationForSort(){
+  if(!navigator.geolocation){
+    alert('เบราว์เซอร์/อุปกรณ์นี้ไม่รองรับการหาตำแหน่งปัจจุบัน (GPS)');
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(
+    pos=>{
+      truckPinCoord = { lat: pos.coords.latitude, lng: pos.coords.longitude, at: Date.now() };
+      tasksSort = 'distance';
+      render();
+    },
+    ()=>{ alert('หาตำแหน่งรถตอนนี้ไม่ได้ — ลองเปิดสิทธิ์ตำแหน่งที่ตั้ง (Location) ให้เบราว์เซอร์ก่อน แล้วลองใหม่'); },
+    { enableHighAccuracy:true, timeout:10000, maximumAge:0 }
+  );
+}
+function selectDistanceTasksSort(){
+  if(truckPinCoord){ tasksSort = 'distance'; render(); return; }
+  pinTruckLocationForSort();
+}
+function openRoutePlotModal(){
+  const useTruckPin = routePlotUseTruckPin && !!truckPinCoord;
+  const ref = useTruckPin ? truckPinCoord : state.shopCoord;
+  if(!ref){ openSetShopCoordForm(); return; }
+  const refLabel = useTruckPin ? `🚚 รถ (${new Date(truckPinCoord.at).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'})})` : '🏠 ร้าน';
+  const stops = [];
+  const noCoordStops = [];
+  state.tasks.forEach(t=>{
+    const cust = t.customerId? state.customers.find(c=>c.id===t.customerId) : null;
+    const name = cust? cust.name : (t.customName||'ไม่ระบุชื่อ');
+    const address = cust? cust.address : t.address;
+    const coord = coordFromAddress(address);
+    if(coord){
+      const dist = haversineKm(ref, coord);
+      const bearing = bearingDeg(ref, coord);
+      stops.push({ t, name, dist, bearing, urgency: getTaskUrgencyState(t), navLink: mapsUrl(address) });
+    } else {
+      noCoordStops.push({ t, name });
+    }
+  });
+  stops.sort((a,b)=>a.dist-b.dist);
+  const maxDist = Math.max(1, ...stops.map(s=>s.dist));
+  const R = 128; // plot radius in svg units, center at (150,150)
+  const urgencyColor = { red:'#B23A2E', yellow:'#D8A32C', green:'#3F8F5B', paused:'#7A8BA0' };
+  const points = stops.map((s,i)=>{
+    const r = (s.dist/maxDist) * R;
+    const rad = s.bearing * Math.PI/180;
+    const x = 150 + r*Math.sin(rad);
+    const y = 150 - r*Math.cos(rad);
+    return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="7" fill="${urgencyColor[s.urgency]||'#888'}" stroke="#fff" stroke-width="1.5"><title>${escapeAttr(s.name)} — ${s.dist.toFixed(1)} กม.</title></circle>
+      <text x="${x.toFixed(1)}" y="${(y-11).toFixed(1)}" font-size="9" text-anchor="middle" fill="#333">${i+1}</text>`;
+  }).join('');
+  const ringRadii = [R*0.33, R*0.66, R];
+  const rings = ringRadii.map(r=>`<circle cx="150" cy="150" r="${r.toFixed(1)}" fill="none" stroke="#ddd" stroke-width="1"></circle>
+    <text x="${(150+r+2).toFixed(1)}" y="153" font-size="8" fill="#aaa">${(maxDist*(r/R)).toFixed(1)}กม.</text>`).join('');
+  const svg = `<svg viewBox="0 0 300 300" style="width:100%;max-width:340px;display:block;margin:0 auto;background:#fafaf7;border-radius:8px;">
+    ${rings}
+    <text x="150" y="14" font-size="11" text-anchor="middle" fill="#999">เหนือ N</text>
+    <text x="150" y="292" font-size="11" text-anchor="middle" fill="#999">ใต้ S</text>
+    <text x="8" y="154" font-size="11" fill="#999">ตต W</text>
+    <text x="272" y="154" font-size="11" fill="#999">ตอ E</text>
+    <circle cx="150" cy="150" r="9" fill="var(--orange-dark, #C1541F)" stroke="#fff" stroke-width="2"></circle>
+    <text x="150" y="168" font-size="9" text-anchor="middle" fill="#333">${refLabel}</text>
+    ${points}
+  </svg>`;
+  // group by 8-point compass sector, sorted nearest-first within each sector, so the list directly
+  // answers "which direction should I head first" — pair with the plot above for a visual double-check
+  const bySector = {};
+  stops.forEach(s=>{
+    const sector = bearingToSector(s.bearing);
+    if(!bySector[sector]) bySector[sector] = [];
+    bySector[sector].push(s);
+  });
+  const sectorOrder = COMPASS_SECTORS.filter(s=>bySector[s]);
+  const listHtml = sectorOrder.map(sector=>`
+    <div class="rem-meta" style="font-weight:700;margin:10px 0 4px;">🧭 ทิศ${sector} (${bySector[sector].length} ราย)</div>
+    ${bySector[sector].map(s=>`
+      <div class="card" style="padding:8px 12px;margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;gap:8px;">
+        <div>${getTaskUrgencyIcon(s.urgency)} <b>${escapeHtml(s.name)}</b> <span class="rem-meta">~${s.dist.toFixed(1)} กม.</span></div>
+        ${s.navLink? `<a class="btn ghost small" href="${s.navLink}" target="_blank" rel="noopener" style="text-decoration:none;flex-shrink:0;">🧭</a>` : ''}
+      </div>`).join('')}
+  `).join('');
+  const noCoordHtml = noCoordStops.length? `
+    <div class="rem-meta" style="margin-top:12px;line-height:1.6;">⚠️ ${noCoordStops.length} รายไม่มีพิกัดที่อ่านได้ (ที่อยู่เป็นข้อความ ไม่ใช่ลิงก์ Google Maps) เลยวางบนแผนผังไม่ได้: ${noCoordStops.map(x=>escapeHtml(x.name)).join(', ')} — ลองแก้โปรไฟล์ลูกค้าแล้ววางลิงก์ Google Maps แทนที่อยู่ข้อความ จะช่วยให้ระบบคำนวณทิศทางให้ได้</div>` : '';
+  const body = `
+    <h3>🧭 แผนผังเส้นทางวันนี้ (offline)</h3>
+    <div class="rem-meta" style="margin-bottom:10px;line-height:1.6;">ประมาณทิศทาง/ระยะทางเป็นเส้นตรงจาก${useTruckPin? 'ตำแหน่งรถที่ปักไว้':'ร้าน'} ไม่ใช่ระยะทางถนนจริง — ใช้ดูคร่าวๆ ว่าควรไปทางไหนก่อน</div>
+    ${stops.length? svg : '<div class="empty">ยังไม่มีงานส่งที่มีพิกัดให้วางบนแผนผัง</div>'}
+    ${listHtml}
+    ${noCoordHtml}
+    <div class="btnrow" style="margin-top:12px;">
+      ${useTruckPin
+        ? `<button type="button" class="btn primary small" id="routePlotPinAgainBtn">📍 ปักหมุดรถใหม่อีกครั้ง</button><button type="button" class="btn ghost small" id="routePlotUseShopBtn">🏠 ใช้พิกัดร้านแทน</button>`
+        : `<button type="button" class="btn primary small" id="routePlotPinBtn">📍 ปักหมุดรถตอนนี้</button><button type="button" class="btn ghost small" id="changeShopCoordBtn">📍 แก้พิกัดร้าน</button>`}
+      <button type="button" class="btn ghost" id="cancelModal">ปิด</button>
+    </div>
+  `;
+  showModal(body);
+  if(useTruckPin){
+    document.getElementById('routePlotPinAgainBtn').addEventListener('click', pinTruckLocationAndPlot);
+    document.getElementById('routePlotUseShopBtn').addEventListener('click', ()=>{ routePlotUseTruckPin = false; openRoutePlotModal(); });
+  } else {
+    document.getElementById('routePlotPinBtn').addEventListener('click', pinTruckLocationAndPlot);
+    document.getElementById('changeShopCoordBtn').addEventListener('click', openSetShopCoordForm);
+  }
 }
 
 function openExportReceiptModal(type){
@@ -4828,7 +5037,7 @@ function renderTasks(){
     </div>`;
 
   const filterLabels = {all:'ทั้งหมด', red:'🔴 ค้างนาน', yellow:'🟡 รอนาน', green:'🟢 ปกติ', paused:'🔵 พักไว้'};
-  const sortLabels = {urgency:'ความเร่งรีบ', name:'ชื่อ', recent:'เพิ่มล่าสุด'};
+  const sortLabels = {urgency:'ความเร่งรีบ', name:'ชื่อ', recent:'เพิ่มล่าสุด', landmark:'จุดสังเกต/สิ่งที่นึกถึง', distance:'ระยะใกล้-ไกล (จากที่ปักหมุด)'};
   const activeSummary = [];
   if(tasksFilterType!=='all') activeSummary.push(filterLabels[tasksFilterType]);
   activeSummary.push('เรียงตาม'+sortLabels[tasksSort]);
@@ -4836,19 +5045,22 @@ function renderTasks(){
   const toggleBtn = `<div class="btnrow" style="margin-bottom:${tasksFilterOpen?'10px':'12px'};">
     <button class="btn ${tasksFilterOpen?'primary':'ghost'} small" id="toggleTasksFilter">⚙️ กรอง/เรียง ${tasksFilterOpen?'▲':'▼'}</button>
     <button class="btn ghost small" id="exportTasksBtn">📤 Export พิมพ์</button>
+    <button class="btn ghost small" id="openRoutePlotBtn">🧭 แผนผังเส้นทาง</button>
+    <button class="btn ghost small" id="pinTruckLocationBtn">📍 ปักหมุดรถตอนนี้</button>
     ${!tasksFilterOpen? `<span class="rem-meta" style="align-self:center;">${activeSummary.join(' · ')}</span>` : ''}
   </div>`;
 
   let panel = '';
   if(tasksFilterOpen){
     const filterChips = [['all','ทั้งหมด'],['red','🔴 ค้างนาน'],['yellow','🟡 รอนาน'],['green','🟢 ปกติ'],['paused','🔵 พักไว้']];
-    const sortOptions = [['urgency','ความเร่งรีบ'],['name','ชื่อ'],['recent','เพิ่มล่าสุด']];
+    const sortOptions = [['urgency','ความเร่งรีบ'],['name','ชื่อ'],['recent','เพิ่มล่าสุด'],['landmark','จุดสังเกต'],['distance','📍 ระยะใกล้-ไกล']];
     panel = `
       <div class="stamp-card" style="margin-bottom:12px;">
         <div class="rem-meta" style="margin-bottom:6px;font-weight:700;">กรองตามสถานะ</div>
         <div class="btnrow" style="margin-bottom:10px;">${filterChips.map(([k,l])=>`<button class="btn ${tasksFilterType===k?'primary':'ghost'} small" data-task-filter="${k}">${l}</button>`).join('')}</div>
         <div class="rem-meta" style="margin-bottom:6px;font-weight:700;">เรียงตาม</div>
         <div class="btnrow">${sortOptions.map(([k,l])=>`<button class="btn ${tasksSort===k?'primary':'ghost'} small" data-tasks-sort="${k}">${l}</button>`).join('')}</div>
+        ${tasksSort==='distance'? `<div class="rem-meta" style="margin-top:6px;">📍 ปักไว้เมื่อ ${truckPinCoord? new Date(truckPinCoord.at).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}) : '-'} <button type="button" class="btn ghost small" id="refreshTruckPinBtn" style="margin-left:6px;">🔄 ปักหมุดใหม่</button></div>` : ''}
         <div class="rem-meta" style="margin:10px 0 6px;font-weight:700;">แสดงผล</div>
         <div class="btnrow"><button class="btn ${getShowPrachanatTaskIcon()?'primary':'ghost'} small" id="togglePrachanatTaskIcon">🪪 ไอคอนบัตรประชารัฐข้างปุ่มนำทาง ${getShowPrachanatTaskIcon()?'(เปิดอยู่)':'(ปิดอยู่)'}</button></div>
       </div>`;
@@ -4880,6 +5092,30 @@ function renderTasks(){
   // (reactivating a paused task), so sorting by that instead made reactivated old tasks jump to the
   // top and look like they'd just been added, which is the bug being fixed here
   else if(tasksSort==='recent') list.sort((a,b)=> (b.addedAt||b.timerStartAt||0) - (a.addedAt||a.timerStartAt||0));
+  // groups tasks by จุดสังเกต/สิ่งที่นึกถึง text (so stops near the same landmark end up next to each
+  // other in the list) — blank/unset landmarks sort to the bottom since there's nothing to group by
+  else if(tasksSort==='landmark') list.sort((a,b)=>{
+    const aCust = a.customerId? state.customers.find(c=>c.id===a.customerId) : null;
+    const bCust = b.customerId? state.customers.find(c=>c.id===b.customerId) : null;
+    const al = (aCust? aCust.landmark : a.landmark) || '';
+    const bl = (bCust? bCust.landmark : b.landmark) || '';
+    if(!al && !bl) return 0;
+    if(!al) return 1;
+    if(!bl) return -1;
+    return al.localeCompare(bl,'th');
+  });
+  // sort by straight-line distance from wherever the truck was pinned (see pinTruckLocationAndPlot/
+  // selectDistanceTasksSort) — stops with no readable coordinate (plain-text address, not a Google
+  // Maps link) sort to the bottom since there's nothing to measure
+  else if(tasksSort==='distance' && truckPinCoord) list.sort((a,b)=>{
+    const aCust = a.customerId? state.customers.find(c=>c.id===a.customerId) : null;
+    const bCust = b.customerId? state.customers.find(c=>c.id===b.customerId) : null;
+    const aCoord = coordFromAddress(aCust? aCust.address : a.address);
+    const bCoord = coordFromAddress(bCust? bCust.address : b.address);
+    const aDist = aCoord? haversineKm(truckPinCoord, aCoord) : Infinity;
+    const bDist = bCoord? haversineKm(truckPinCoord, bCoord) : Infinity;
+    return aDist - bDist;
+  });
   else list.sort((a,b)=> stateWeight[getTaskUrgencyState(a)] - stateWeight[getTaskUrgencyState(b)]);
 
   if(!state.tasks.length) return intro + notifyBanner + truckBar + '<div class="empty">ยังไม่มีงานส่งของวันนี้<br>แตะปุ่ม + เพื่อเพิ่มรายชื่อที่ต้องไปส่ง</div>';
@@ -4892,7 +5128,6 @@ function renderTasks(){
     const address = cust? cust.address : t.address;
     const navLink = mapsUrl(address);
     const urgencyState = getTaskUrgencyState(t);
-    const startedAt = t.timerStartAt || Date.parse(t.createdAt) || Date.now();
     const truckShortfall = t.gasBreakdown? getTruckStockShortfall(t.gasBreakdown) : [];
     // old-debt badge — quick red flag next to the name so the driver knows before knocking on the
     // door; kept short (money + cylinder count only, no wording) so it doesn't crowd the card
@@ -4903,6 +5138,17 @@ function renderTasks(){
     }
     const oldDebtBadge = oldDebtParts.length? ` <span style="color:var(--red);font-size:11px;font-weight:700;">${oldDebtParts.join(' ')}</span>` : '';
     const hasPrachanatCredit = cust && Number(cust.prachanatCredit||0)>0 && getShowPrachanatTaskIcon();
+    // per user's request: drop the urgency wording/elapsed-time text (the colored emoji next to
+    // the name is enough on its own) and show ซอย/หมู่/จุดสังเกต here instead, same text size
+    const taskSoi = cust? cust.soi : t.soi;
+    const taskMoo = cust? cust.moo : t.moo;
+    const taskLandmark = cust? cust.landmark : t.landmark;
+    // only computed/shown while sorted by distance, so it doesn't clutter the card the rest of the time
+    let cardDistKm = null;
+    if(tasksSort==='distance' && truckPinCoord){
+      const coord = coordFromAddress(address);
+      if(coord) cardDistKm = haversineKm(truckPinCoord, coord);
+    }
     return `
     <div class="card rem-card">
       <div class="checkbox" data-complete-task="${t.id}" style="cursor:pointer;"></div>
@@ -4910,11 +5156,12 @@ function renderTasks(){
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
           <div class="rem-title"><span data-set-urgency="${t.id}" style="cursor:pointer;padding:2px 4px;margin:-2px -4px;border-radius:6px;" title="แตะเพื่อเปลี่ยนสถานะ">${getTaskUrgencyIcon(urgencyState)}</span> ${escapeHtml(displayName)}${truckShortfall.length? ` <span title="ถังในรถไม่พอสำหรับลูกค้านี้">⚠️</span>` : ''}${oldDebtBadge}</div>
           <div style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
+            ${cardDistKm!=null? `<span class="tag gas" style="font-size:11px;">📍~${cardDistKm.toFixed(1)}กม.</span>` : ''}
             ${hasPrachanatCredit? `<span title="มีเครดิตบัตรประชารัฐ ฿${fmtMoney(cust.prachanatCredit)}">🪪</span>` : ''}
             ${navLink? `<a class="btn ghost small" href="${navLink}" target="_blank" rel="noopener" style="text-decoration:none;">🧭 นำทาง</a>` : ''}
           </div>
         </div>
-        <div class="rem-meta">${getTaskUrgencyLabel(urgencyState)} · ${formatElapsed(startedAt)}</div>
+        <div class="rem-meta">ซอย ${taskSoi? escapeHtml(taskSoi) : '-'} · หมู่ ${taskMoo? escapeHtml(taskMoo) : '-'} · 🏠 ${taskLandmark? escapeHtml(taskLandmark) : '-'}</div>
         ${t.gasBreakdown && sumGasBreakdown(t.gasBreakdown)>0? `<div class="rem-meta">${gasBrandIconsHtml(t.gasBreakdown, 16) || '🛢️'} ${gasBreakdownSummary(t.gasBreakdown)}</div>` : ''}
         ${truckShortfall.length? `<div class="rem-meta" style="color:var(--red);font-weight:600;">⚠️ ถังในรถไม่พอ: ${truckShortfall.map(s=>`${GAS_BRAND_LABELS[s.brand]} ${s.size}kg ขาด ${s.need-s.have} (มี ${s.have}/${s.need})`).join(', ')}</div>` : ''}
         ${t.otherItems && t.otherItems.length? `<div class="rem-meta">🧰 ${otherItemsSummary(t.otherItems)}</div>` : ''}
@@ -5804,6 +6051,10 @@ function attachHandlers(){
   if(toggleTasksFilter) toggleTasksFilter.addEventListener('click', ()=>{ tasksFilterOpen = !tasksFilterOpen; render(); });
   const exportTasksBtn = document.getElementById('exportTasksBtn');
   if(exportTasksBtn) exportTasksBtn.addEventListener('click', ()=>openExportReceiptModal('tasks'));
+  const openRoutePlotBtn = document.getElementById('openRoutePlotBtn');
+  if(openRoutePlotBtn) openRoutePlotBtn.addEventListener('click', openRoutePlotModal);
+  const pinTruckLocationBtn = document.getElementById('pinTruckLocationBtn');
+  if(pinTruckLocationBtn) pinTruckLocationBtn.addEventListener('click', pinTruckLocationAndPlot);
   document.querySelectorAll('[data-show-tasks-breakdown]').forEach(b=>b.addEventListener('click', showTasksBreakdownModal));
   document.querySelectorAll('[data-open-truck-stock]').forEach(b=>b.addEventListener('click', openTruckStockModal));
   document.querySelectorAll('[data-set-urgency]').forEach(b=>b.addEventListener('click', ()=>openTaskUrgencyPicker(b.dataset.setUrgency)));
@@ -5832,7 +6083,12 @@ function attachHandlers(){
     }
   }));
   document.querySelectorAll('[data-rank-sort]').forEach(b=>b.addEventListener('click', ()=>{ rankSort = b.dataset.rankSort; render(); }));
-  document.querySelectorAll('[data-tasks-sort]').forEach(b=>b.addEventListener('click', ()=>{ tasksSort = b.dataset.tasksSort; render(); }));
+  document.querySelectorAll('[data-tasks-sort]').forEach(b=>b.addEventListener('click', ()=>{
+    if(b.dataset.tasksSort === 'distance'){ selectDistanceTasksSort(); return; }
+    tasksSort = b.dataset.tasksSort; render();
+  }));
+  const refreshTruckPinBtn = document.getElementById('refreshTruckPinBtn');
+  if(refreshTruckPinBtn) refreshTruckPinBtn.addEventListener('click', pinTruckLocationForSort);
   const togglePrachanatTaskIcon = document.getElementById('togglePrachanatTaskIcon');
   if(togglePrachanatTaskIcon) togglePrachanatTaskIcon.addEventListener('click', ()=>{ setShowPrachanatTaskIcon(!getShowPrachanatTaskIcon()); render(); });
   const taskSearchInput = document.getElementById('taskSearchInput');
