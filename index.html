@@ -581,42 +581,41 @@ function getCustomerCycleInfo(customerId){
   };
 }
 
-/* ---------------- Customer tier — automatic (no manual assignment needed), based on recent spend
-   + order frequency, per user's request "ยอดซื้อสะสม/ความถี่". Thresholds are starting defaults;
-   adjust here if they don't match real customer behavior once there's more data to look at.
-   'new'      -> 🆕  (fewer than 2 sales on record — not enough history to judge yet)
-   'inactive' -> 👤 greyed out (used to order, but nothing in the last 90 days — same faded
-                 grayscale/opacity treatment already used for empty tanks on ถังบนรถ, for visual
-                 consistency across the app)
-   'diamond'  -> 👑  (big spender in the last 6 months, OR orders very often)
-   'regular'  -> 👤  (the same default icon as before — unchanged, no special treatment) ---------------- */
-const CUSTOMER_TIER_INACTIVE_DAYS = 90;
-const CUSTOMER_TIER_DIAMOND_SPEND_180D = 5000; // baht spent in the last ~6 months
-const CUSTOMER_TIER_DIAMOND_MAX_AVG_DAYS = 20; // or orders on average at least this often
+/* ---------------- Customer tier — automatic (no manual assignment needed), based purely on days
+   since the customer's last actual order, per user's specific thresholds:
+   'new'        -> 🆕  (fewer than 2 sales on record — not enough history to judge yet)
+   'crown'      -> 👑 มงกุฎ   (last ordered ≤12 days ago — very frequent)
+   'regular'    -> 👤 ทั่วไป   (13-28 days)
+   'occasional' -> 🚶 ขาจร    (29-60 days)
+   'ghost'      -> 👻 ล่องหน   (more than 60 days — hasn't ordered in ages, greyed-out line-art icon
+                   reused from the old "inactive" tier for visual consistency) ---------------- */
+const CUSTOMER_TIER_CROWN_MAX_DAYS = 12;
+const CUSTOMER_TIER_REGULAR_MAX_DAYS = 28;
+const CUSTOMER_TIER_OCCASIONAL_MAX_DAYS = 60;
 function getCustomerTier(customerId){
   const salesAll = state.sales.filter(s=>s.customerId===customerId);
   if(salesAll.length < 2) return 'new';
   const lastDate = salesAll.reduce((max,s)=> (s.date||'') > max? s.date : max, salesAll[0].date||'');
   const daysSinceLast = Math.round((Date.now() - Date.parse(lastDate)) / 86400000);
-  if(!isNaN(daysSinceLast) && daysSinceLast > CUSTOMER_TIER_INACTIVE_DAYS) return 'inactive';
-  const cutoffMs = Date.now() - 180*86400000;
-  const recentSpend = salesAll.filter(s=>Date.parse(s.date)>=cutoffMs).reduce((a,s)=>a+Number(s.amount||0),0);
-  const cycle = getCustomerCycleInfo(customerId);
-  if(recentSpend >= CUSTOMER_TIER_DIAMOND_SPEND_180D || (cycle && cycle.avgDays<=CUSTOMER_TIER_DIAMOND_MAX_AVG_DAYS)) return 'diamond';
-  return 'regular';
+  if(isNaN(daysSinceLast)) return 'regular';
+  if(daysSinceLast <= CUSTOMER_TIER_CROWN_MAX_DAYS) return 'crown';
+  if(daysSinceLast <= CUSTOMER_TIER_REGULAR_MAX_DAYS) return 'regular';
+  if(daysSinceLast <= CUSTOMER_TIER_OCCASIONAL_MAX_DAYS) return 'occasional';
+  return 'ghost';
 }
-// line-art outline person (white body, grey stroke) for the "inactive" tier — deliberately NOT a
+// line-art outline person (white body, grey stroke) for the "ghost" tier — deliberately NOT a
 // filled emoji like the other tiers, so it reads as "faded/hollow" at a glance rather than just a
 // dimmed version of the same icon
-const INACTIVE_TIER_ICON_SVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="#fff" stroke="#9a9a9a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;"><circle cx="12" cy="8" r="4"></circle><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1"></path></svg>`;
+const GHOST_TIER_ICON_SVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="#fff" stroke="#9a9a9a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;"><circle cx="12" cy="8" r="4"></circle><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1"></path></svg>`;
 function customerTierIconHtml(customerId){
   const tier = getCustomerTier(customerId);
   if(tier==='new') return '🆕';
-  if(tier==='diamond') return '👑';
-  if(tier==='inactive') return `<span title="ลูกค้าเก่าที่หายไปนาน (ไม่ได้สั่งเกิน 90 วัน)">${INACTIVE_TIER_ICON_SVG}</span>`;
+  if(tier==='crown') return '👑';
+  if(tier==='occasional') return '🚶';
+  if(tier==='ghost') return `<span title="ไม่ได้สั่งเกิน 60 วัน">${GHOST_TIER_ICON_SVG}</span>`;
   return '👤';
 }
-const CUSTOMER_TIER_LABELS = { new:'🆕 ลูกค้าใหม่', diamond:'👑 เพชร', inactive:'👤 หายไปนาน', regular:'👤 ทั่วไป' };
+const CUSTOMER_TIER_LABELS = { new:'🆕 ลูกค้าใหม่', crown:'👑 มงกุฎ', regular:'👤 ทั่วไป', occasional:'🚶 ขาจร', ghost:'👻 ล่องหน' };
 
 // plain "when did they last actually order gas" fact — no averaging/forecasting, per user's
 // request to drop the cycle-prediction math ("อยากรู้ว่าแค่ว่า สั่งล่าสุดเมื่อไหร่ แค่นั้นก็พอ").
@@ -2696,7 +2695,7 @@ function renderCustomers(){
   const toolRow = `<div class="btnrow" style="margin-bottom:10px;"><button class="btn ghost small" id="openImportBtn">📋 นำเข้าหลายรายการ</button><button class="btn ghost small" id="exportCsvBtn">📤 ส่งออก CSV</button><button class="btn ${dupeGroupCount? 'primary':'ghost'} small" id="openDupeCheckBtn">🔀 ตรวจสอบชื่อซ้ำ${dupeGroupCount? ` (${dupeGroupCount})` : ''}</button><button class="btn ghost small" id="openManualMergeBtn">🔀 รวมลูกค้าเอง</button></div>`;
 
   const activeSummary = [];
-  if(customersFilterType!=='all') activeSummary.push({debt:'มีหนี้',gas:'มีถังค้าง',nophone:'ไม่มีเบอร์โทร',tierDiamond:'👑 เพชร',tierInactive:'👤 หายไปนาน',tierNew:'🆕 ลูกค้าใหม่'}[customersFilterType]);
+  if(customersFilterType!=='all') activeSummary.push({debt:'มีหนี้',gas:'มีถังค้าง',nophone:'ไม่มีเบอร์โทร',tierCrown:'👑 มงกุฎ',tierRegular:'👤 ทั่วไป',tierOccasional:'🚶 ขาจร',tierGhost:'👻 ล่องหน',tierNew:'🆕 ลูกค้าใหม่'}[customersFilterType]);
   const sortLabels = {name:'ชื่อ',debt:'ยอดหนี้',gas:'ถังค้าง',recent:'เพิ่มล่าสุด'};
   activeSummary.push('เรียงตาม'+sortLabels[customersSort]);
   const searchBar = `<div class="field" style="margin-bottom:10px;"><input id="custSearchInput" placeholder="🔍 ค้นหาชื่อหรือเบอร์โทรลูกค้า..." value="${escapeAttr(customerSearchQuery)}"></div>`;
@@ -2708,13 +2707,13 @@ function renderCustomers(){
   let panel = '';
   if(customersFilterOpen){
     const filterChips = [['all','ทั้งหมด'],['debt','มีหนี้'],['gas','มีถังค้าง'],['nophone','ไม่มีเบอร์โทร']];
-    const tierChips = [['tierDiamond','👑 เพชร'],['tierInactive','👤 หายไปนาน'],['tierNew','🆕 ลูกค้าใหม่']];
+    const tierChips = [['tierCrown','👑 มงกุฎ'],['tierRegular','👤 ทั่วไป'],['tierOccasional','🚶 ขาจร'],['tierGhost','👻 ล่องหน'],['tierNew','🆕 ลูกค้าใหม่']];
     const sortOptions = [['name','ชื่อ'],['debt','ยอดหนี้'],['gas','ถังค้าง'],['recent','เพิ่มล่าสุด']];
     panel = `
       <div class="stamp-card" style="margin-bottom:12px;">
         <div class="rem-meta" style="margin-bottom:6px;font-weight:700;">กรอง</div>
         <div class="btnrow" style="margin-bottom:10px;">${filterChips.map(([k,l])=>`<button class="btn ${customersFilterType===k?'primary':'ghost'} small" data-cust-filter="${k}">${l}</button>`).join('')}</div>
-        <div class="rem-meta" style="margin-bottom:6px;font-weight:700;">กรองตาม tier (คำนวณอัตโนมัติจากยอดซื้อ/ความถี่)</div>
+        <div class="rem-meta" style="margin-bottom:6px;font-weight:700;">กรองตาม tier (คำนวณอัตโนมัติจากวันที่สั่งล่าสุด)</div>
         <div class="btnrow" style="margin-bottom:10px;">${tierChips.map(([k,l])=>`<button class="btn ${customersFilterType===k?'primary':'ghost'} small" data-cust-filter="${k}">${l}</button>`).join('')}</div>
         <div class="rem-meta" style="margin-bottom:6px;font-weight:700;">เรียงตาม</div>
         <div class="btnrow">${sortOptions.map(([k,l])=>`<button class="btn ${customersSort===k?'primary':'ghost'} small" data-cust-sort="${k}">${l}</button>`).join('')}</div>
@@ -2729,8 +2728,10 @@ function renderCustomers(){
   if(customersFilterType==='debt') list = list.filter(c=>Number(c.debt||0)>0);
   else if(customersFilterType==='gas') list = list.filter(c=>Number(c.gasCylinders||0)>0);
   else if(customersFilterType==='nophone') list = list.filter(c=>!c.phone);
-  else if(customersFilterType==='tierDiamond') list = list.filter(c=>getCustomerTier(c.id)==='diamond');
-  else if(customersFilterType==='tierInactive') list = list.filter(c=>getCustomerTier(c.id)==='inactive');
+  else if(customersFilterType==='tierCrown') list = list.filter(c=>getCustomerTier(c.id)==='crown');
+  else if(customersFilterType==='tierRegular') list = list.filter(c=>getCustomerTier(c.id)==='regular');
+  else if(customersFilterType==='tierOccasional') list = list.filter(c=>getCustomerTier(c.id)==='occasional');
+  else if(customersFilterType==='tierGhost') list = list.filter(c=>getCustomerTier(c.id)==='ghost');
   else if(customersFilterType==='tierNew') list = list.filter(c=>getCustomerTier(c.id)==='new');
   if(customersSort==='debt') list.sort((a,b)=>Number(b.debt||0)-Number(a.debt||0));
   else if(customersSort==='gas') list.sort((a,b)=>Number(b.gasCylinders||0)-Number(a.gasCylinders||0));
@@ -3557,14 +3558,17 @@ function renderDailyDeliveryList(){
 function drawChart(){
   const canvas = document.getElementById('salesChart');
   if(!canvas) return;
-  const {labels, values} = buildSeries(salesPeriod);
+  const {labels, values, expenseValues} = buildSeries(salesPeriod);
   if(window._salesChart) window._salesChart.destroy();
   window._salesChart = new Chart(canvas.getContext('2d'), {
     type:'bar',
-    data:{ labels, datasets:[{ label:'ยอดขาย (บาท)', data:values, backgroundColor:'#DB6B2A', borderRadius:4 }] },
+    data:{ labels, datasets:[
+      { label:'ยอดขาย', data:values, backgroundColor:'#3C7A5B', borderRadius:4 },
+      { label:'รายจ่าย', data:expenseValues, backgroundColor:'#B23A2E', borderRadius:4 }
+    ] },
     options:{
       responsive:true,
-      plugins:{ legend:{display:false} },
+      plugins:{ legend:{display:true, labels:{font:{family:'IBM Plex Mono'},color:'#5C6255'}}, tooltip:{ callbacks:{ label:ctx=>ctx.dataset.label+': ฿'+fmtMoney(ctx.parsed.y) } } },
       scales:{
         x:{ grid:{display:false}, ticks:{font:{family:'IBM Plex Mono'},color:'#5C6255'} },
         y:{ grid:{color:'#DDD6C2'}, ticks:{font:{family:'IBM Plex Mono'},color:'#5C6255'} }
@@ -3573,9 +3577,19 @@ function drawChart(){
   });
 }
 
+// ยอดขาย (orange) vs รายจ่าย (red) per time bucket, same buckets as the period selector above the
+// chart — lets the shop see at a glance whether a given day/week/month/year was actually profitable,
+// not just how much came in
 function buildSeries(period){
   const now = new Date();
-  const labels=[], values=[];
+  const labels=[], values=[], expenseValues=[];
+  // expense = purchases (รับถัง bills) + manually-logged รายจ่ายอื่นๆ transactions within the same
+  // date range as the sales bucket, mirroring getPLItems's 'expense' categorization
+  function expenseBetween(startKey, endKey){
+    const purchaseTotal = state.purchases.filter(p=>p.date>=startKey && p.date<=endKey).reduce((a,p)=>a+Number(p.billAmount||0),0);
+    const txTotal = state.transactions.filter(t=>t.type==='expense' && t.date>=startKey && t.date<=endKey).reduce((a,t)=>a+Number(t.amount||0),0);
+    return purchaseTotal + txTotal;
+  }
   // same rule as the dashboard: ค้างจ่าย (unpaid) sales aren't counted until the debt is actually paid off
   if(period==='day'){
     for(let i=13;i>=0;i--){
@@ -3583,6 +3597,7 @@ function buildSeries(period){
       const key = d.toISOString().slice(0,10);
       labels.push(d.toLocaleDateString('th-TH',{day:'2-digit',month:'2-digit'}));
       values.push(state.sales.filter(s=>s.date===key && !s.unpaid).reduce((a,b)=>a+Number(b.amount),0));
+      expenseValues.push(expenseBetween(key, key));
     }
   } else if(period==='week'){
     for(let i=7;i>=0;i--){
@@ -3591,6 +3606,7 @@ function buildSeries(period){
       const startKey=start.toISOString().slice(0,10), endKey=end.toISOString().slice(0,10);
       labels.push(start.toLocaleDateString('th-TH',{day:'2-digit',month:'2-digit'}));
       values.push(state.sales.filter(s=>s.date>=startKey && s.date<=endKey && !s.unpaid).reduce((a,b)=>a+Number(b.amount),0));
+      expenseValues.push(expenseBetween(startKey, endKey));
     }
   } else if(period==='month'){
     for(let i=11;i>=0;i--){
@@ -3598,15 +3614,17 @@ function buildSeries(period){
       const key = d.toISOString().slice(0,7);
       labels.push(d.toLocaleDateString('th-TH',{month:'short',year:'2-digit'}));
       values.push(state.sales.filter(s=>s.date.slice(0,7)===key && !s.unpaid).reduce((a,b)=>a+Number(b.amount),0));
+      expenseValues.push(expenseBetween(key+'-01', key+'-31'));
     }
   } else {
     for(let i=4;i>=0;i--){
       const y = now.getFullYear()-i;
       labels.push(String(y));
       values.push(state.sales.filter(s=>s.date.slice(0,4)===String(y) && !s.unpaid).reduce((a,b)=>a+Number(b.amount),0));
+      expenseValues.push(expenseBetween(y+'-01-01', y+'-12-31'));
     }
   }
-  return {labels, values};
+  return {labels, values, expenseValues};
 }
 
 function openSaleForm(presetCustomerId, editId){
@@ -4860,55 +4878,72 @@ function openRoutePlotModal(){
   const maxDist = Math.max(1, ...stops.map(s=>s.dist));
   const R = 128; // plot radius in svg units, center at (150,150)
   const urgencyColor = { red:'#B23A2E', yellow:'#D8A32C', green:'#3F8F5B', paused:'#7A8BA0' };
-  // GROUP BY REAL PLACE, NOT COMPASS ANGLE: with hundreds of stops packed into distinct village
-  // clusters (not spread evenly by direction), an 8-way compass split lumps unrelated villages
-  // that merely happen to share a bearing from the shop. Instead, union-find stops that share the
-  // same non-empty ซอย, หมู่, or จุดสังเกต into one cluster — any single shared field is enough to
-  // merge two stops (and merges chain transitively: if A~B share a หมู่ and B~C share a ซอย, A/B/C
-  // all end up in one cluster) — since a shared street/village name is a far more reliable "these
-  // are neighbors" signal than raw GPS distance in rural/hilly terrain. Stops with none of these
-  // fields in common with anyone else just become their own single-stop cluster.
-  function buildStopClusters(list){
-    const n = list.length;
-    const parent = Array.from({length:n}, (_,i)=>i);
-    function find(i){ while(parent[i]!==i){ parent[i]=parent[parent[i]]; i=parent[i]; } return i; }
-    function union(i,j){ const ri=find(i), rj=find(j); if(ri!==rj) parent[ri]=rj; }
-    for(let i=0;i<n;i++){
-      for(let j=i+1;j<n;j++){
-        const a=list[i], b=list[j];
-        if((a.landmark && b.landmark && a.landmark===b.landmark) ||
-           (a.soi && b.soi && a.soi===b.soi) ||
-           (a.moo && b.moo && a.moo===b.moo)) union(i,j);
-      }
-    }
-    const groups = {};
-    list.forEach((s,i)=>{ const r=find(i); if(!groups[r]) groups[r]=[]; groups[r].push(s); });
-    return Object.values(groups);
+  // ROUTE ALGORITHM v2 — single-pass greedy nearest-neighbor over ALL stops (no separate "group
+  // first, then order" step), using an EFFECTIVE distance that softly discounts (not hard-merges)
+  // stops sharing a ซอย/หมู่/จุดสังเกต with wherever we currently are. Real GPS distance is always
+  // the primary signal; shared address fields just nudge the choice when two candidates are close —
+  // this is more forgiving than the old exact-match clustering (which missed neighbors who simply
+  // didn't fill in the same field) and avoids committing to a zone boundary before seeing the whole
+  // picture. A 2-opt pass afterward untangles any obvious backtracking the greedy walk left behind.
+  function effectiveDist(curCoord, curSoi, curMoo, curLandmark, s){
+    const d = haversineKm(curCoord, s.coord);
+    if(curLandmark && s.landmark && curLandmark===s.landmark) return d*0.25;
+    if(curSoi && s.soi && curSoi===s.soi) return d*0.4;
+    if(curMoo && s.moo && curMoo===s.moo) return d*0.7;
+    return d;
   }
-  // within a cluster (or when there's only ever one stop in it), still walk a greedy nearest-neighbor
-  // chain rather than raw distance-from-shop order — closest-to-current-stop, not closest-to-shop
-  function orderZoneNearestNeighbor(zoneStops, startCoord){
-    const remaining = [...zoneStops];
-    const ordered = [];
+  function buildGreedyTour(list, startCoord){
+    const remaining = [...list];
+    const tour = [];
     let curCoord = startCoord, curSoi = null, curMoo = null, curLandmark = null;
     while(remaining.length){
       let bestIdx = 0, bestScore = Infinity;
       remaining.forEach((s,i)=>{
-        let score = haversineKm(curCoord, s.coord);
-        if(curLandmark && s.landmark && curLandmark===s.landmark) score -= 1.5;
-        else if(curSoi && s.soi && curSoi===s.soi) score -= 1;
-        else if(curMoo && s.moo && curMoo===s.moo) score -= 0.3;
+        const score = effectiveDist(curCoord, curSoi, curMoo, curLandmark, s);
         if(score < bestScore){ bestScore = score; bestIdx = i; }
       });
       const next = remaining.splice(bestIdx,1)[0];
-      ordered.push(next);
+      tour.push(next);
       curCoord = next.coord; curSoi = next.soi; curMoo = next.moo; curLandmark = next.landmark;
     }
-    return ordered;
+    return tour;
   }
-  // labels a cluster using whichever field (จุดสังเกต > หมู่ > ซอย) shows up most often among its
-  // members, so the zone header reads like a real place ("🏠 บ้านสีฟ้า ตรงข้ามวัด") instead of a
-  // compass direction — falls back to the compass sector only for lone stops with no field filled in
+  function tourEffectiveLength(tour, startCoord){
+    let total = 0;
+    let curCoord = startCoord, curSoi = null, curMoo = null, curLandmark = null;
+    tour.forEach(s=>{
+      total += effectiveDist(curCoord, curSoi, curMoo, curLandmark, s);
+      curCoord = s.coord; curSoi = s.soi; curMoo = s.moo; curLandmark = s.landmark;
+    });
+    return total;
+  }
+  // classic 2-opt local-search improvement: try reversing every possible sub-segment of the tour,
+  // keep the reversal if it shortens the total effective length, repeat until nothing helps anymore
+  // (or a safety cap is hit) — cheap for the handful of stops a delivery day realistically has
+  function twoOptImprove(tour, startCoord){
+    if(tour.length > 60) return tour; // safety cap — skip for unrealistically large stop counts
+    let best = [...tour];
+    let bestLen = tourEffectiveLength(best, startCoord);
+    let improved = true, guard = 0;
+    while(improved && guard < 25){
+      improved = false; guard++;
+      for(let i=0;i<best.length-1;i++){
+        for(let j=i+1;j<best.length;j++){
+          const candidate = best.slice(0,i).concat(best.slice(i,j+1).reverse(), best.slice(j+1));
+          const candidateLen = tourEffectiveLength(candidate, startCoord);
+          if(candidateLen < bestLen - 1e-9){ best = candidate; bestLen = candidateLen; improved = true; }
+        }
+      }
+    }
+    return best;
+  }
+  const tour = twoOptImprove(buildGreedyTour(stops, ref), ref);
+  tour.forEach((s,i)=>{ s.num = i+1; });
+  // grouping into named zones is now purely a DISPLAY concern, done AFTER the route order is already
+  // decided — start a new zone whenever two consecutive stops in the final route neither share a
+  // ซอย/หมู่/จุดสังเกต NOR are within a short hop of each other, so the list still reads like
+  // "these are roughly the same area" without that grouping ever having steered the route itself
+  const DISPLAY_ZONE_GAP_KM = 1.5;
   function pickModeValue(list, field){
     const tally = {};
     list.forEach(s=>{ if(s[field]) tally[s[field]] = (tally[s[field]]||0)+1; });
@@ -4916,24 +4951,25 @@ function openRoutePlotModal(){
     Object.entries(tally).forEach(([v,c])=>{ if(c>bestCount){ best=v; bestCount=c; } });
     return best;
   }
-  function clusterLabel(clusterStops){
-    const landmark = pickModeValue(clusterStops,'landmark');
+  function groupLabel(groupStops){
+    const landmark = pickModeValue(groupStops,'landmark');
     if(landmark) return `🏠 ${landmark}`;
-    const moo = pickModeValue(clusterStops,'moo');
+    const moo = pickModeValue(groupStops,'moo');
     if(moo) return `หมู่ ${moo}`;
-    const soi = pickModeValue(clusterStops,'soi');
+    const soi = pickModeValue(groupStops,'soi');
     if(soi) return `ซอย ${soi}`;
-    return `🧭 ทิศ${bearingToSector(clusterStops[0].bearing)}`;
+    return `🧭 ทิศ${bearingToSector(groupStops[0].bearing)}`;
   }
-  const clusterObjs = buildStopClusters(stops).map(clusterStops=>{
-    const ordered = orderZoneNearestNeighbor(clusterStops, ref);
-    return { stops: ordered, minDist: Math.min(...clusterStops.map(s=>s.dist)), label: clusterLabel(clusterStops) };
+  const displayGroups = [];
+  tour.forEach(s=>{
+    const cur = displayGroups.length? displayGroups[displayGroups.length-1] : null;
+    const prev = cur? cur.stops[cur.stops.length-1] : null;
+    const sharesField = prev && ((prev.landmark && s.landmark && prev.landmark===s.landmark) || (prev.soi && s.soi && prev.soi===s.soi) || (prev.moo && s.moo && prev.moo===s.moo));
+    const gapDist = prev? haversineKm(prev.coord, s.coord) : Infinity;
+    if(!cur || (!sharesField && gapDist > DISPLAY_ZONE_GAP_KM)) displayGroups.push({ stops:[s] });
+    else cur.stops.push(s);
   });
-  // visit closest cluster first — same number shown on the plot circle carries onto the list below,
-  // so a driver can match "จุดที่ 3" in the list back to the right dot on the SVG at a glance
-  clusterObjs.sort((a,b)=>a.minDist-b.minDist);
-  let visitNum = 0;
-  clusterObjs.forEach(c=>{ c.stops.forEach(s=>{ s.num = ++visitNum; }); });
+  displayGroups.forEach(g=>{ g.label = groupLabel(g.stops); });
   const points = stops.map(s=>{
     const r = (s.dist/maxDist) * R;
     const rad = s.bearing * Math.PI/180;
@@ -4955,9 +4991,9 @@ function openRoutePlotModal(){
     <text x="150" y="168" font-size="9" text-anchor="middle" fill="#333">${refLabel}</text>
     ${points}
   </svg>`;
-  const listHtml = clusterObjs.map(c=>`
-    <div class="rem-meta" style="font-weight:700;margin:10px 0 4px;">${escapeHtml(c.label)} (${c.stops.length} ราย)</div>
-    ${c.stops.map(s=>`
+  const listHtml = displayGroups.map(g=>`
+    <div class="rem-meta" style="font-weight:700;margin:10px 0 4px;">${escapeHtml(g.label)} (${g.stops.length} ราย)</div>
+    ${g.stops.map(s=>`
       <div class="card" style="padding:8px 12px;margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;gap:8px;">
         <div>${getTaskUrgencyIcon(s.urgency)} <b>${s.num}. ${escapeHtml(s.name)}</b> <span class="rem-meta">~${s.dist.toFixed(1)} กม.</span></div>
         ${s.navLink? `<a class="btn ghost small" href="${s.navLink}" target="_blank" rel="noopener" style="text-decoration:none;flex-shrink:0;">🧭</a>` : ''}
