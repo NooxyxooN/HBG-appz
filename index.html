@@ -512,6 +512,7 @@ let debtorsDateFilter = 'all';
 let debtorsCustomDate = todayISO();
 let debtorSearchQuery = '';
 let tasksFilterOpen = false;
+let dailyNoteExpanded = false;
 let tasksFilterType = 'all';
 let customerSearchQuery = '';
 
@@ -647,6 +648,7 @@ async function init(){
   migrateNumericSoiMoo();
   migrateAddNewDefaultProducts();
   migrateTruckStockShape();
+  migrateDailyNotesShape();
   state.loaded = true;
   document.getElementById('todayLabel').textContent = new Date().toLocaleDateString('th-TH',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
   render();
@@ -678,7 +680,7 @@ async function init(){
     window.fbListen('truckStock', items=>{ if(items){ state.truckStock = items; render(); } });
     window.fbListen('inventoryAdjustments', items=>{ if(items){ state.inventoryAdjustments = items; render(); } });
     window.fbListen('shopCoord', item=>{ if(item){ state.shopCoord = item; render(); } });
-    window.fbListen('dailyNotes', items=>{ if(items){ state.dailyNotes = items; render(); } });
+    window.fbListen('dailyNotes', items=>{ if(items){ state.dailyNotes = items; migrateDailyNotesShape(); render(); } });
   }catch(e){ console.error('realtime listener setup failed', e); }
 }
 
@@ -759,6 +761,20 @@ function migrateTruckStockShape(){
     return i;
   });
   if(changed) persistTruckStock();
+}
+
+// old shape was one free-text string per date; new shape is an array of short bullet items per date
+function migrateDailyNotesShape(){
+  let changed = false;
+  Object.keys(state.dailyNotes||{}).forEach(d=>{
+    const v = state.dailyNotes[d];
+    if(typeof v === 'string'){
+      state.dailyNotes[d] = v.trim() ? [v.trim()] : [];
+      if(!state.dailyNotes[d].length) delete state.dailyNotes[d];
+      changed = true;
+    }
+  });
+  if(changed) persistDailyNotes();
 }
 
 /* ---------------- persistence helpers ---------------- */
@@ -1172,6 +1188,16 @@ document.getElementById('fab').addEventListener('click', ()=>{
 function render(){
   const app = document.getElementById('app');
   if(!state.loaded){ app.innerHTML = '<div class="empty">กำลังโหลดข้อมูล...</div>'; return; }
+  // preserve whatever text box someone is actively typing into (plus cursor position) across this
+  // re-render. render() gets called for all sorts of reasons that have nothing to do with what's being
+  // typed — a realtime update arriving from Firestore, the once-a-minute Tasks-tab refresh, etc — and
+  // without this, rebuilding the tab's HTML from scratch would silently wipe out a half-typed note or
+  // search box the moment one of those unrelated updates lands mid-keystroke.
+  const activeEl = document.activeElement;
+  let focusRestore = null;
+  if(activeEl && app.contains(activeEl) && (activeEl.tagName==='INPUT' || activeEl.tagName==='TEXTAREA') && activeEl.id){
+    focusRestore = { id: activeEl.id, value: activeEl.value, selStart: activeEl.selectionStart, selEnd: activeEl.selectionEnd };
+  }
   if(currentTab==='dashboard') app.innerHTML = renderDashboard();
   else if(currentTab==='tasks') app.innerHTML = renderTasks();
   else if(currentTab==='customers') app.innerHTML = renderCustomers();
@@ -1182,6 +1208,14 @@ function render(){
   else if(currentTab==='purchases') app.innerHTML = renderPurchases();
   attachHandlers();
   if(currentTab==='sales') drawChart();
+  if(focusRestore){
+    const el = document.getElementById(focusRestore.id);
+    if(el && (el.tagName==='INPUT' || el.tagName==='TEXTAREA')){
+      if(!el.value && focusRestore.value) el.value = focusRestore.value; // template rebuilt it blank (e.g. a quick-add box) — put the typed text back
+      el.focus();
+      try{ el.setSelectionRange(focusRestore.selStart, focusRestore.selEnd); }catch(e){}
+    }
+  }
 }
 
 /* ---------------- RANK ---------------- */
@@ -1581,19 +1615,39 @@ function renderDashboard(){
 
   const dailySummaryButtonRow = `<div class="btnrow" style="margin-bottom:12px;"><button class="btn ghost small" id="openDailySummaryBtn">📋 สรุปผลประจำวัน (อัตโนมัติตั้งแต่ 00:00 น.)</button></div>`;
 
-  // free-text scratchpad for the shop, one entry per date — for anything worth remembering that
-  // doesn't fit the structured data (sales/tasks/debts) elsewhere in the app, e.g. "วันนี้แก๊สขาดตลาด
-  // ราคาขึ้น" or "ลูกค้าโทรมาต่อว่าเรื่องส่งช้า". Kept dead simple: one textarea per day, autosaves
-  // on blur, with a history modal to look back at (and edit/delete) past days' notes.
-  const todayNoteText = state.dailyNotes[todayISO()] || '';
+  // itemized scratchpad for the shop, a list of short bullet entries per date — for anything worth
+  // remembering that doesn't fit the structured data (sales/tasks/debts) elsewhere in the app, e.g.
+  // "แก๊สขาดตลาด ราคาขึ้น" or "ลูกค้าฝากข้อความ". Collapsed by default showing only the latest item so
+  // it stays out of the way; expand to see/add/remove the full list for today. History modal looks
+  // back at (and lets you delete items from) past days.
+  const todayNoteItems = state.dailyNotes[todayISO()] || [];
+  const latestNoteItem = todayNoteItems.length ? todayNoteItems[todayNoteItems.length-1] : null;
+  const dailyNoteListHtml = dailyNoteExpanded
+    ? (todayNoteItems.length
+        ? todayNoteItems.map((item,idx)=>`
+          <div class="card" style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;padding:8px 12px;margin-bottom:6px;">
+            <div style="flex:1;white-space:pre-wrap;">• ${escapeHtml(item)}</div>
+            <div style="display:flex;gap:4px;">
+              <button type="button" class="btn ghost small" data-edit-daily-note-item="${idx}">✏️</button>
+              <button type="button" class="btn ghost small" data-delete-daily-note-item="${idx}">🗑️</button>
+            </div>
+          </div>`).join('')
+        : '<div class="rem-meta" style="margin-bottom:8px;">ยังไม่มีบันทึกวันนี้</div>')
+    : `<div class="rem-meta" style="margin-bottom:8px;">${latestNoteItem ? '• '+escapeHtml(latestNoteItem) : 'ยังไม่มีบันทึกวันนี้'}</div>`;
   const dailyNoteCard = `
     <div class="stamp-card">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
         <div style="font-weight:700;">📝 บันทึกประจำวันของร้าน</div>
-        <button class="btn ghost small" id="viewDailyNotesHistoryBtn">📜 ย้อนหลัง</button>
+        <div style="display:flex;gap:6px;">
+          <button type="button" class="btn ghost small" id="toggleDailyNoteExpand">${dailyNoteExpanded ? '▲ พับ' : '▼ ดูทั้งหมด'}</button>
+          <button type="button" class="btn ghost small" id="viewDailyNotesHistoryBtn">📜 ย้อนหลัง</button>
+        </div>
       </div>
-      <textarea id="dailyNoteInput" rows="3" placeholder="จดอะไรก็ได้ที่อยากจำไว้วันนี้ เช่น เหตุการณ์พิเศษ ของขาด ลูกค้าฝากข้อความ ฯลฯ">${escapeHtml(todayNoteText)}</textarea>
-      <div class="rem-meta" style="margin-top:6px;">แตะที่อื่นหลังพิมพ์เพื่อบันทึกอัตโนมัติ</div>
+      ${dailyNoteListHtml}
+      <div class="btnrow">
+        <input id="dailyNoteQuickInput" placeholder="พิมพ์แล้วกด + เพื่อเพิ่มข้อความ" style="flex:1;padding:9px 10px;border:1px solid var(--border);border-radius:6px;font-family:'Sarabun',sans-serif;font-size:14.5px;">
+        <button type="button" class="btn primary small" id="addDailyNoteItemBtn">➕</button>
+      </div>
     </div>`;
 
   const plCard = `
@@ -2021,17 +2075,17 @@ function openInventoryAdjustmentHistoryModal(){
   showModal(body);
 }
 
-// list of past days' บันทึกประจำวัน (today's own entry is edited directly on the dashboard card —
-// this modal is for looking back at / correcting / clearing old ones)
+// list of past days' บันทึกประจำวัน (today's own entries are added/removed directly on the dashboard
+// card — this modal is for looking back at / deleting individual items from past days)
 function openDailyNotesHistoryModal(){
   const today = todayISO();
-  const dates = Object.keys(state.dailyNotes||{}).filter(d=>d!==today && (state.dailyNotes[d]||'').trim()).sort((a,b)=>b.localeCompare(a));
+  const dates = Object.keys(state.dailyNotes||{}).filter(d=>d!==today && (state.dailyNotes[d]||[]).length).sort((a,b)=>b.localeCompare(a));
   const body = `
     <h3>📜 บันทึกประจำวันย้อนหลัง</h3>
     ${dates.length? dates.map(d=>`
       <div class="card" style="padding:10px 14px;margin-bottom:6px;cursor:pointer;" data-edit-daily-note="${d}">
         <div style="font-weight:700;margin-bottom:4px;">${fmtDateShort(d)}</div>
-        <div class="rem-meta" style="white-space:pre-wrap;">${escapeHtml(state.dailyNotes[d])}</div>
+        ${state.dailyNotes[d].map(item=>`<div class="rem-meta" style="white-space:pre-wrap;">• ${escapeHtml(item)}</div>`).join('')}
       </div>`).join('') : '<div class="empty">ยังไม่มีบันทึกย้อนหลัง</div>'}
     <div class="btnrow" style="margin-top:12px;">
       <button type="button" class="btn ghost" id="cancelModal">ปิด</button>
@@ -2041,34 +2095,62 @@ function openDailyNotesHistoryModal(){
   document.querySelectorAll('[data-edit-daily-note]').forEach(el=>el.addEventListener('click', ()=>openEditDailyNoteEntry(el.dataset.editDailyNote)));
 }
 function openEditDailyNoteEntry(dateStr){
+  const items = state.dailyNotes[dateStr] || [];
   const body = `
     <h3>📝 บันทึกวันที่ ${fmtDateShort(dateStr)}</h3>
-    <form class="panel" id="editDailyNoteForm" novalidate>
-      <div class="field"><textarea id="f_editDailyNote" rows="5">${escapeHtml(state.dailyNotes[dateStr]||'')}</textarea></div>
+    ${items.length? items.map((item,idx)=>`
+      <div class="card" style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;padding:8px 12px;margin-bottom:6px;">
+        <div style="flex:1;white-space:pre-wrap;">• ${escapeHtml(item)}</div>
+        <div style="display:flex;gap:4px;">
+          <button type="button" class="btn ghost small" data-edit-past-note-item="${idx}">✏️</button>
+          <button type="button" class="btn ghost small" data-delete-past-note-item="${idx}">🗑️</button>
+        </div>
+      </div>`).join('') : '<div class="rem-meta" style="margin-bottom:8px;">ไม่มีบันทึกวันนี้แล้ว</div>'}
+    <div class="btnrow" style="margin-top:12px;">
+      <button type="button" class="btn ghost" id="cancelModal">ปิด</button>
+    </div>
+  `;
+  showModal(body);
+  document.querySelectorAll('[data-delete-past-note-item]').forEach(b=>b.addEventListener('click', ()=>{
+    const idx = Number(b.dataset.deletePastNoteItem);
+    state.dailyNotes[dateStr].splice(idx,1);
+    if(!state.dailyNotes[dateStr].length) delete state.dailyNotes[dateStr];
+    persistDailyNotes();
+    closeModal();
+    openDailyNotesHistoryModal();
+  }));
+  document.querySelectorAll('[data-edit-past-note-item]').forEach(b=>b.addEventListener('click', ()=>{
+    openEditNoteItemForm(dateStr, Number(b.dataset.editPastNoteItem));
+  }));
+}
+
+// shared edit form for a single บันทึกประจำวัน item — works for both today's card (returns to the
+// dashboard render) and a past date opened from the history modal (returns to that date's list)
+function openEditNoteItemForm(dateStr, idx){
+  const items = state.dailyNotes[dateStr] || [];
+  const currentText = items[idx] || '';
+  const isToday = dateStr === todayISO();
+  const body = `
+    <h3>✏️ แก้ไขบันทึก ${fmtDateShort(dateStr)}</h3>
+    <form class="panel" id="editNoteItemForm" novalidate>
+      <div class="field"><textarea id="f_editNoteItem" rows="4">${escapeHtml(currentText)}</textarea></div>
       <div class="btnrow">
         <button type="submit" class="btn primary">บันทึก</button>
-        <button type="button" class="btn danger" id="deleteDailyNoteBtn">ลบ</button>
         <button type="button" class="btn ghost" id="cancelModal">ยกเลิก</button>
       </div>
     </form>
   `;
   showModal(body);
-  document.getElementById('editDailyNoteForm').addEventListener('submit', e=>{
+  document.getElementById('editNoteItemForm').addEventListener('submit', e=>{
     e.preventDefault();
-    const val = document.getElementById('f_editDailyNote').value.trim();
-    if(val) state.dailyNotes[dateStr] = val;
-    else delete state.dailyNotes[dateStr];
+    const val = document.getElementById('f_editNoteItem').value.trim();
+    if(val) state.dailyNotes[dateStr][idx] = val;
+    else state.dailyNotes[dateStr].splice(idx,1);
+    if(!state.dailyNotes[dateStr].length) delete state.dailyNotes[dateStr];
     persistDailyNotes();
     closeModal();
-    openDailyNotesHistoryModal();
-  });
-  document.getElementById('deleteDailyNoteBtn').addEventListener('click', ()=>{
-    if(confirm('ลบบันทึกวันนี้ใช่หรือไม่?')){
-      delete state.dailyNotes[dateStr];
-      persistDailyNotes();
-      closeModal();
-      openDailyNotesHistoryModal();
-    }
+    if(isToday) render();
+    else openEditDailyNoteEntry(dateStr);
   });
 }
 
@@ -6180,14 +6262,37 @@ function attachHandlers(){
   if(addTransactionBtn) addTransactionBtn.addEventListener('click', ()=>openTransactionForm());
   const openDailySummaryBtn = document.getElementById('openDailySummaryBtn');
   if(openDailySummaryBtn) openDailySummaryBtn.addEventListener('click', openDailySummaryModal);
-  const dailyNoteInput = document.getElementById('dailyNoteInput');
-  if(dailyNoteInput) dailyNoteInput.addEventListener('blur', ()=>{
-    const val = dailyNoteInput.value.trim();
+  const toggleDailyNoteExpand = document.getElementById('toggleDailyNoteExpand');
+  if(toggleDailyNoteExpand) toggleDailyNoteExpand.addEventListener('click', ()=>{ dailyNoteExpanded = !dailyNoteExpanded; render(); });
+  const dailyNoteQuickInput = document.getElementById('dailyNoteQuickInput');
+  const addDailyNoteItemBtn = document.getElementById('addDailyNoteItemBtn');
+  const submitDailyNoteQuickItem = ()=>{
+    if(!dailyNoteQuickInput) return;
+    const val = dailyNoteQuickInput.value.trim();
+    if(!val) return;
     const today = todayISO();
-    if(val) state.dailyNotes[today] = val;
-    else delete state.dailyNotes[today];
+    if(!state.dailyNotes[today]) state.dailyNotes[today] = [];
+    state.dailyNotes[today].push(val);
     persistDailyNotes();
-  });
+    dailyNoteExpanded = true;
+    dailyNoteQuickInput.value = ''; // clear now so render()'s focus/value restore doesn't bring the submitted text back
+    render();
+  };
+  if(addDailyNoteItemBtn) addDailyNoteItemBtn.addEventListener('click', submitDailyNoteQuickItem);
+  if(dailyNoteQuickInput) dailyNoteQuickInput.addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); submitDailyNoteQuickItem(); } });
+  document.querySelectorAll('[data-delete-daily-note-item]').forEach(b=>b.addEventListener('click', ()=>{
+    const idx = Number(b.dataset.deleteDailyNoteItem);
+    const today = todayISO();
+    if(state.dailyNotes[today]){
+      state.dailyNotes[today].splice(idx,1);
+      if(!state.dailyNotes[today].length) delete state.dailyNotes[today];
+      persistDailyNotes();
+      render();
+    }
+  }));
+  document.querySelectorAll('[data-edit-daily-note-item]').forEach(b=>b.addEventListener('click', ()=>{
+    openEditNoteItemForm(todayISO(), Number(b.dataset.editDailyNoteItem));
+  }));
   const viewDailyNotesHistoryBtn = document.getElementById('viewDailyNotesHistoryBtn');
   if(viewDailyNotesHistoryBtn) viewDailyNotesHistoryBtn.addEventListener('click', openDailyNotesHistoryModal);
   document.querySelectorAll('[data-show-pl]').forEach(el=>el.addEventListener('click', ()=>{
