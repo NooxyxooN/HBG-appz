@@ -512,7 +512,7 @@ let debtorsDateFilter = 'all';
 let debtorsCustomDate = todayISO();
 let debtorSearchQuery = '';
 let tasksFilterOpen = false;
-let dailyNoteExpanded = false;
+let dailyNoteExpanded = true;
 let tasksFilterType = 'all';
 let customerSearchQuery = '';
 
@@ -1644,10 +1644,8 @@ function renderDashboard(){
         </div>
       </div>
       ${dailyNoteListHtml}
-      <div class="btnrow">
-        <input id="dailyNoteQuickInput" placeholder="พิมพ์แล้วกด + เพื่อเพิ่มข้อความ" style="flex:1;padding:9px 10px;border:1px solid var(--border);border-radius:6px;font-family:'Sarabun',sans-serif;font-size:14.5px;">
-        <button type="button" class="btn primary small" id="addDailyNoteItemBtn">➕</button>
-      </div>
+      <textarea id="dailyNoteInput" rows="3" placeholder="จดอะไรก็ได้ที่อยากจำไว้วันนี้ เช่น เหตุการณ์พิเศษ ของขาด ลูกค้าฝากข้อความ ฯลฯ" style="width:100%;padding:9px 10px;border:1px solid var(--border);border-radius:6px;font-family:'Sarabun',sans-serif;font-size:14.5px;resize:vertical;"></textarea>
+      <div class="rem-meta" style="margin-top:6px;">แตะที่อื่นหลังพิมพ์เพื่อบันทึกอัตโนมัติเป็นข้อใหม่</div>
     </div>`;
 
   const plCard = `
@@ -6264,22 +6262,20 @@ function attachHandlers(){
   if(openDailySummaryBtn) openDailySummaryBtn.addEventListener('click', openDailySummaryModal);
   const toggleDailyNoteExpand = document.getElementById('toggleDailyNoteExpand');
   if(toggleDailyNoteExpand) toggleDailyNoteExpand.addEventListener('click', ()=>{ dailyNoteExpanded = !dailyNoteExpanded; render(); });
-  const dailyNoteQuickInput = document.getElementById('dailyNoteQuickInput');
-  const addDailyNoteItemBtn = document.getElementById('addDailyNoteItemBtn');
-  const submitDailyNoteQuickItem = ()=>{
-    if(!dailyNoteQuickInput) return;
-    const val = dailyNoteQuickInput.value.trim();
+  // back to the old "just type and walk away" textarea (dad-friendly — no + button to remember to
+  // press) but underneath it still adds each save as a NEW itemized entry rather than overwriting the
+  // whole day, so the collapse/history/edit/delete features built on top of the array shape still work
+  const dailyNoteInput = document.getElementById('dailyNoteInput');
+  if(dailyNoteInput) dailyNoteInput.addEventListener('blur', ()=>{
+    const val = dailyNoteInput.value.trim();
     if(!val) return;
     const today = todayISO();
     if(!state.dailyNotes[today]) state.dailyNotes[today] = [];
     state.dailyNotes[today].push(val);
     persistDailyNotes();
-    dailyNoteExpanded = true;
-    dailyNoteQuickInput.value = ''; // clear now so render()'s focus/value restore doesn't bring the submitted text back
+    dailyNoteInput.value = ''; // clear now so render()'s focus/value restore doesn't bring the saved text back
     render();
-  };
-  if(addDailyNoteItemBtn) addDailyNoteItemBtn.addEventListener('click', submitDailyNoteQuickItem);
-  if(dailyNoteQuickInput) dailyNoteQuickInput.addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); submitDailyNoteQuickItem(); } });
+  });
   document.querySelectorAll('[data-delete-daily-note-item]').forEach(b=>b.addEventListener('click', ()=>{
     const idx = Number(b.dataset.deleteDailyNoteItem);
     const today = todayISO();
