@@ -2969,7 +2969,10 @@ function openCustomerForm(id){
       <div class="field-row">
         <div class="field">
           <label>ซอย (ตัวเลข หรือ ตัวเลข/ตัวเลข เช่น 3/3)</label>
-          <input id="f_soi" list="soiList" inputmode="numeric" pattern="[0-9/]*" oninput="this.value=this.value.replace(/[^0-9/]/g,'')" value="${c? escapeAttr(stripSoiChars(c.soi)):''}" placeholder="เช่น 5 หรือ 3/3" autocomplete="off">
+          <div style="display:flex;gap:6px;">
+            <input id="f_soi" list="soiList" inputmode="numeric" pattern="[0-9/]*" oninput="this.value=this.value.replace(/[^0-9/]/g,'')" value="${c? escapeAttr(stripSoiChars(c.soi)):''}" placeholder="เช่น 5 หรือ 3/3" autocomplete="off" style="flex:1;">
+            <button type="button" class="btn ghost small" data-insert-char="/" data-insert-target="f_soi" style="padding:0 16px;">/</button>
+          </div>
           <datalist id="soiList">${soiOptions.map(v=>`<option value="${escapeAttr(v)}">`).join('')}</datalist>
         </div>
         <div class="field">
@@ -3231,6 +3234,14 @@ function openAddDebtPrompt(id){
       return;
     }
     const note = document.getElementById('f_note').value.trim();
+    // these tanks have to come from somewhere physical — pull them out of the shop's own empty-cylinder
+    // slot (not conjured from nowhere) so the stock count stays honest; this was the bug: adding tank
+    // debt here never touched inventory at all, so the "borrowed with customer" count could climb
+    // forever without shop stock ever reflecting it
+    if(gasQty>0){
+      gasItems.forEach(item=>{ inventoryRemoveEmpty(item.size, item.brand, Number(item.qty||0)); });
+      persistInventory();
+    }
     adjustCustomerRemote(c.id, fresh=>{
       const updated = cloneCustomerForEdit(fresh);
       if(amt>0) updated.debt = Number(updated.debt||0) + amt;
@@ -5477,7 +5488,10 @@ function openTaskForm(editId){
         <div class="field-row">
           <div class="field">
             <label>ซอย (ตัวเลข หรือ ตัวเลข/ตัวเลข เช่น 3/3)</label>
-            <input id="f_taskSoi" list="taskSoiList" inputmode="numeric" pattern="[0-9/]*" oninput="this.value=this.value.replace(/[^0-9/]/g,'')" value="${editing? escapeAttr(stripSoiChars(editing.soi)):''}" placeholder="เช่น 5 หรือ 3/3" autocomplete="off">
+            <div style="display:flex;gap:6px;">
+              <input id="f_taskSoi" list="taskSoiList" inputmode="numeric" pattern="[0-9/]*" oninput="this.value=this.value.replace(/[^0-9/]/g,'')" value="${editing? escapeAttr(stripSoiChars(editing.soi)):''}" placeholder="เช่น 5 หรือ 3/3" autocomplete="off" style="flex:1;">
+              <button type="button" class="btn ghost small" data-insert-char="/" data-insert-target="f_taskSoi" style="padding:0 16px;">/</button>
+            </div>
             <datalist id="taskSoiList">${soiOptions.map(v=>`<option value="${escapeAttr(v)}">`).join('')}</datalist>
           </div>
           <div class="field">
@@ -6013,6 +6027,24 @@ document.getElementById('modalRoot').addEventListener('click', e=>{
   if(!btn) return;
   const el = document.getElementById(btn.dataset.qtyQuick);
   if(el) el.value = btn.dataset.qtyVal;
+});
+
+// delegated once — inserts a character at the cursor position of a target field, for symbols that
+// mobile numeric keypads don't show a key for (e.g. "/" in the ซอย field, which uses inputmode="numeric"
+// so the on-screen keyboard is digits-only and there's no way to type "/" without this)
+document.getElementById('modalRoot').addEventListener('click', e=>{
+  const btn = e.target.closest('[data-insert-char]');
+  if(!btn) return;
+  const el = document.getElementById(btn.dataset.insertTarget);
+  if(!el) return;
+  const ch = btn.dataset.insertChar;
+  const start = el.selectionStart!=null? el.selectionStart : el.value.length;
+  const end = el.selectionEnd!=null? el.selectionEnd : el.value.length;
+  el.value = el.value.slice(0,start) + ch + el.value.slice(end);
+  el.focus();
+  const newPos = start + ch.length;
+  try{ el.setSelectionRange(newPos, newPos); }catch(err){}
+  el.dispatchEvent(new Event('input', { bubbles:true }));
 });
 
 // inline calculator: every numeric field in the app is a plain text input (see the global
