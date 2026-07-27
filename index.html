@@ -629,6 +629,54 @@ function getCustomerLastOrder(customerId){
   return { lastDate, daysSinceLast };
 }
 
+// บัญชีดำ — still owes money/cylinders AND hasn't paid ANY of it down (even partially) in 35+ days.
+// Ordering more gas is irrelevant here — per user's correction, only an actual repayment (money via
+// openPaymentPrompt, or a cylinder return via openCylinderReturnPrompt) resets the clock. Each of
+// those pushes a dated entry into customer.debtPaymentLog. If no repayment has ever been logged, fall
+// back to the EARLIEST debt-creating sale (unpaid / cylinderPending) so a customer who's owed
+// continuously since day one without ever paying anything still ages out correctly, instead of
+// piling on more debt resetting the clock (which openAddDebtPrompt/normal sales deliberately do NOT
+// touch — only paying down does).
+const DEBTOR_BLACKLIST_INACTIVE_DAYS = 35;
+// the single reference point the 35-day บัญชีดำ clock counts from, plus which kind of event it is —
+// either "type:'payment'" (dated from the last actual repayment/cylinder-return) or "type:'debtStart'"
+// (dated from the earliest still-unpaid debt-creating sale, used only when no repayment has ever
+// happened at all). Shared by isCustomerBlacklisted and the "ค้างมา X วัน" display on debtor rows.
+function getCustomerDebtClockInfo(customerId){
+  const c = state.customers.find(x=>x.id===customerId);
+  if(!c) return null;
+  const hasDebt = Number(c.debt||0)>0 || Number(c.gasCylinders||0)>0;
+  if(!hasDebt) return null;
+  const paymentDates = (c.debtPaymentLog||[]).map(l=>l.date).filter(Boolean);
+  let date, type;
+  if(paymentDates.length){
+    date = paymentDates.reduce((max,d)=> d>max? d : max, paymentDates[0]);
+    type = 'payment';
+  } else {
+    const debtDates = state.sales.filter(s=>s.customerId===customerId && (s.unpaid || s.cylinderPending)).map(s=>s.date).filter(Boolean);
+    if(debtDates.length){
+      date = debtDates.reduce((min,d)=> d<min? d : min, debtDates[0]);
+      type = 'debtStart';
+    } else if(c.createdAt){
+      // no dated debt-creating sale exists at all — this debt was almost certainly typed straight
+      // into the "ยอดค้างชำระ" field on the customer form rather than through เพิ่มหนี้/a sale, so
+      // there's no real date to point to. Fall back to when the customer record itself was added, as
+      // an estimate (per user's choice) — any future เพิ่มหนี้ use will create a real dated sale and
+      // take over from here automatically via the debtDates branch above.
+      date = c.createdAt.slice(0,10); // createdAt is a full ISO timestamp; keep just the date part
+      type = 'estimated';
+    } else {
+      return null;
+    }
+  }
+  const days = Math.round((Date.now() - Date.parse(date)) / 86400000);
+  return { date, type, days };
+}
+function isCustomerBlacklisted(customerId){
+  const info = getCustomerDebtClockInfo(customerId);
+  return !!info && info.days >= DEBTOR_BLACKLIST_INACTIVE_DAYS;
+}
+
 async function init(){
   state.customers = await loadData('customers', []);
   state.sales = await loadData('sales', []);
@@ -656,11 +704,13 @@ async function init(){
   notifyNewTasks();
   document.getElementById('shareQrBtn').addEventListener('click', openShareModal);
   trySaveDailySummaryIfDue();
+  tryNotifyFridayDebtCallIfDue();
 
   // keep task urgency icons / elapsed-time counters fresh, and refresh the daily summary snapshot
   setInterval(()=>{
     if(currentTab==='tasks') render();
     trySaveDailySummaryIfDue();
+    tryNotifyFridayDebtCallIfDue();
   }, 60000);
 
   // realtime sync: update automatically when the other person changes data, no manual refresh needed
@@ -715,23 +765,21 @@ function openShareModal(){
   });
 }
 
-// one-time cleanup: old ซอย/หมู่ entries sometimes had text mixed in (e.g. "ซอย 5", "หมู่3 ")
-// — keep only the digits, per user request ("ผิดเดี๋ยวไปแก้ทีหลัง" if the number itself is wrong)
+// one-time cleanup: old หมู่ entries sometimes had text mixed in (e.g. "หมู่3 ") — keep only the
+// digits. ซอย used to get the same treatment, but ซอย is now a free-text field again (per user
+// request — real addresses need letters/dashes sometimes, not just digits/slash), so it's no longer
+// force-stripped here or at input time.
 function migrateNumericSoiMoo(){
   let custChanged = false;
   state.customers.forEach(c=>{
-    const newSoi = stripSoiChars(c.soi);
     const newMoo = stripToDigits(c.moo);
-    if(newSoi !== (c.soi||'')){ c.soi = newSoi; custChanged = true; }
     if(newMoo !== (c.moo||'')){ c.moo = newMoo; custChanged = true; }
   });
   if(custChanged) persistCustomers();
 
   let taskChanged = false;
   state.tasks.forEach(t=>{
-    const newSoi = stripSoiChars(t.soi);
     const newMoo = stripToDigits(t.moo);
-    if(newSoi !== (t.soi||'')){ t.soi = newSoi; taskChanged = true; }
     if(newMoo !== (t.moo||'')){ t.moo = newMoo; taskChanged = true; }
   });
   if(taskChanged) persistTasks();
@@ -1156,6 +1204,25 @@ function notifyNewTasks(){
     showLocalNotification('🆕 งานส่งใหม่', `มีงานส่งใหม่เพิ่ม ${newTasks.length} รายการ`);
   }
 }
+// weekly "call to collect" nudge — every Friday from 8:00 AM onward, if there's still anyone owing
+// money/cylinders, fire one local notification reminding the shop owner to start calling debtors.
+// Piggybacks on the same Notification permission already granted for new-งานส่ง alerts — no separate
+// opt-in. Only fires once per Friday (localStorage dedupe), and only while the app happens to be open
+// (same "local, not push" limitation as the task notifications above).
+function tryNotifyFridayDebtCallIfDue(){
+  if(!('Notification' in window) || Notification.permission !== 'granted') return;
+  const now = new Date();
+  if(now.getDay() !== 5) return; // 5 = Friday
+  if(now.getHours() < 8) return;
+  const todayKey = todayISO();
+  let lastNotified = null;
+  try{ lastNotified = localStorage.getItem('lastFridayDebtCallNotify'); }catch(e){}
+  if(lastNotified === todayKey) return;
+  const debtorCount = state.customers.filter(c=>Number(c.debt||0)>0 || Number(c.gasCylinders||0)>0).length;
+  try{ localStorage.setItem('lastFridayDebtCallNotify', todayKey); }catch(e){} // mark done even if 0, so it doesn't re-check all day
+  if(!debtorCount) return;
+  showLocalNotification('📞 โทรทวงหนี้ประจำสัปดาห์', `วันนี้วันศุกร์ มีลูกหนี้ค้างอยู่ ${debtorCount} ราย ลองโทรทวงดูนะ`);
+}
 function requestTaskNotificationPermission(){
   if(!('Notification' in window)) return;
   Notification.requestPermission().then(()=>{
@@ -1570,6 +1637,7 @@ function openPurchaseQuickPayForm(id){
 function renderDashboard(){
   const totalDebt = state.customers.reduce((a,c)=>a+Number(c.debt||0),0);
   const totalGas = state.customers.reduce((a,c)=>a+Number(c.gasCylinders||0),0);
+  const blacklistedCustomers = state.customers.filter(c=>isCustomerBlacklisted(c.id));
   // split the total borrowed-cylinder count by brand for the dashboard card. Older/bulk-imported
   // customers may have a gasCylinders count with no brand breakdown recorded — default that
   // unspecified portion to "regular" so regular+ptt always adds back up to the real total
@@ -1662,6 +1730,15 @@ function renderDashboard(){
         <div class="stat" data-goto-tab="debtors" style="cursor:pointer;grid-column:span 2;"><div class="label">ยอดหนี้รวม (แตะดู)</div><div class="value debt">฿${fmtMoney(totalDebt)}</div></div>
       </div>
     </div>`;
+
+  const blacklistCard = blacklistedCustomers.length ? `
+    <div class="stamp-card" data-goto-debtors-blacklist="1" style="cursor:pointer;background:#000;border-color:#000;">
+      <div style="display:flex;justify-content:space-between;align-items:center;color:#fff;">
+        <div style="font-weight:700;">🚫 บัญชีดำ (แตะดู)</div>
+        <div style="font-weight:700;font-size:18px;">${blacklistedCustomers.length} ราย</div>
+      </div>
+      <div style="color:#ddd;font-size:12.5px;margin-top:4px;">ติดหนี้และไม่ได้ทยอยจ่ายคืน/คืนถังเลยเกิน ${DEBTOR_BLACKLIST_INACTIVE_DAYS} วัน</div>
+    </div>` : '';
 
   const avgCost = getWeightedAvgCostPerUnit();
   // merged card: ราคาแก๊สวันนี้ + สต๊อกถังที่ร้าน live together now, so a size's price/profit and its
@@ -1777,6 +1854,7 @@ function renderDashboard(){
     ${dailySummaryButtonRow}
     ${dailyNoteCard}
     ${plCard}
+    ${blacklistCard}
     ${priceCard}
     ${otherProductsCard}
     ${purchaseCard}
@@ -2922,7 +3000,7 @@ function renderCustomerCard(c, opts){
       <button class="btn ghost small" data-add-prachanat-credit="${c.id}">🪪 เครดิตประชารัฐ</button>
       ${Number(c.debt||0)>0 && Number(c.thaiChuayCredit||0)>0? `<button class="btn ghost small" style="background:var(--green-bg);" data-reconcile-credit="${c.id}">⚖️ หักหนี้ด้วยเครดิต</button>` : ''}
       <button class="btn ghost small" data-reorder-cust="${c.id}">➕ สั่งอีกรอบ</button>
-      ${opts.showInvoiceBtn && Number(c.debt||0)>0? `<button class="btn ghost small" data-bill-debtor="${c.id}">🧾 ใบแจ้งหนี้</button>` : ''}
+      ${opts.showInvoiceBtn && (Number(c.debt||0)>0 || Number(c.gasCylinders||0)>0)? `<button class="btn ghost small" data-bill-debtor="${c.id}">🧾 ใบแจ้งหนี้/บิล</button>` : ''}
       ${opts.showClearAll? `<button class="btn primary small" style="background:var(--green);" data-clear-all-cust="${c.id}">✅ เคลียร์ครบ</button>` : ''}
     </div>
     <div class="btnrow">
@@ -2966,17 +3044,15 @@ function openCustomerForm(id){
         <button type="button" class="btn ghost small" id="useLocationBtn" style="margin-top:6px;">📍 ใช้ตำแหน่งปัจจุบัน (ตอนไปถึงหน้าบ้านลูกค้า)</button>
         <div id="locationStatus" class="rem-meta" style="margin-top:4px;"></div>
       </div>
+      <div class="field"><label>บ้านเลขที่</label><input id="f_houseNo" value="${c? escapeAttr(c.houseNo||''):''}" placeholder="เช่น 12/3" autocomplete="off"></div>
       <div class="field-row">
         <div class="field">
-          <label>ซอย (ตัวเลข หรือ ตัวเลข/ตัวเลข เช่น 3/3)</label>
-          <div style="display:flex;gap:6px;">
-            <input id="f_soi" list="soiList" inputmode="numeric" pattern="[0-9/]*" oninput="this.value=this.value.replace(/[^0-9/]/g,'')" value="${c? escapeAttr(stripSoiChars(c.soi)):''}" placeholder="เช่น 5 หรือ 3/3" autocomplete="off" style="flex:1;">
-            <button type="button" class="btn ghost small" data-insert-char="/" data-insert-target="f_soi" style="padding:0 16px;">/</button>
-          </div>
+          <label>ซอย</label>
+          <input id="f_soi" list="soiList" value="${c? escapeAttr(c.soi||''):''}" placeholder="เช่น 5 หรือ 3/3" autocomplete="off">
           <datalist id="soiList">${soiOptions.map(v=>`<option value="${escapeAttr(v)}">`).join('')}</datalist>
         </div>
         <div class="field">
-          <label>หมู่ (ตัวเลขเท่านั้น)</label>
+          <label>หมู่</label>
           <input id="f_moo" list="mooList" inputmode="numeric" pattern="[0-9]*" oninput="this.value=this.value.replace(/[^0-9]/g,'')" value="${c? escapeAttr(stripToDigits(c.moo)):''}" placeholder="เช่น 3" autocomplete="off">
           <datalist id="mooList">${mooOptions.map(v=>`<option value="${escapeAttr(v)}">`).join('')}</datalist>
         </div>
@@ -3048,7 +3124,8 @@ function openCustomerForm(id){
       name: document.getElementById('f_name').value.trim(),
       phone: document.getElementById('f_phone').value.trim(),
       address: document.getElementById('f_address').value.trim(),
-      soi: stripSoiChars(document.getElementById('f_soi').value),
+      houseNo: document.getElementById('f_houseNo').value.trim(),
+      soi: document.getElementById('f_soi').value.trim(),
       moo: stripToDigits(document.getElementById('f_moo').value),
       landmark: document.getElementById('f_landmark').value.trim(),
       gasCylindersBreakdown,
@@ -3141,6 +3218,8 @@ function openPaymentPrompt(id){
       if(usePrachanat){
         updated.prachanatCreditLog = [...(updated.prachanatCreditLog||[]), { id: uid(), date: todayISO(), amount: prachanatCards*80, times: prachanatCards, note: 'จ่ายหนี้ด้วยบัตรประชารัฐ' }];
       }
+      // any partial (or full) money repayment resets the "บัญชีดำ" clock — see isCustomerBlacklisted
+      updated.debtPaymentLog = [...(updated.debtPaymentLog||[]), { id: uid(), date: todayISO(), type:'money', amount: amt }];
       return updated;
     }).then(()=>render());
     state.sales.push({
@@ -3186,6 +3265,8 @@ function openCylinderReturnPrompt(id){
     adjustCustomerRemote(c.id, fresh=>{
       const updated = cloneCustomerForEdit(fresh);
       removeFromCustomerGasBreakdown(updated, items);
+      // any partial (or full) cylinder return resets the "บัญชีดำ" clock too — see isCustomerBlacklisted
+      updated.debtPaymentLog = [...(updated.debtPaymentLog||[]), { id: uid(), date: todayISO(), type:'cylinder', qty }];
       return updated;
     }).then(()=>render());
     items.forEach(item=>{ inventoryAddEmpty(item.size, item.brand, item.qty); });
@@ -4381,8 +4462,9 @@ function buildBillHtml(record, kind, senderName, address, qrPayId, qrLineId){
 }
 
 /* shorter ~100mm x 53mm variant of the receipt above, for when only a Peripage A6 (not the A9) is
-   on hand — same font scale as buildBillHtml (not enlarged like the door-hanger notice below), just
-   with the QR/scan-to-pay block dropped entirely so the whole thing fits in a shorter strip of paper */
+   on hand — text is enlarged ~1.3x vs buildBillHtml (still nowhere near as huge as the door-hanger
+   notice below, which is meant to be legible from a distance), and the QR/scan-to-pay block is
+   dropped entirely so the whole thing fits in a shorter strip of paper */
 function buildBillHtmlCompact(record, kind, senderName, address){
   const cust = record.customerId ? state.customers.find(c=>c.id===record.customerId) : null;
   const custName = cust ? cust.name : (kind==='task' ? (record.customName||'ไม่ระบุชื่อ') : (record.note || 'ลูกค้าหน้าร้าน'));
@@ -4397,7 +4479,11 @@ function buildBillHtmlCompact(record, kind, senderName, address){
   const billTitle = isEstimate ? 'ใบส่งของ (ประมาณการ)' : 'ใบเสร็จรับเงิน';
   const itemsTable = buildItemsTableHtml(record, amount);
 
+  // wrapped in a font-size:1.3em box so every em-based rule below scales up together — makes the
+  // printed A6 strip a bit longer (more line-wrapping) in exchange for noticeably bigger, easier to
+  // read text, per user request ("ใบเสร็จแบบ a6 ดูเล็กไปหน่อย เพื่อความยาวกับตัวหนังสือ ก็ได้นะ")
   return `
+  <div style="font-size:1.3em;">
   <div style="text-align:center;">
     <div style="font-weight:bold;font-size:1.3em;">${escapeHtml(SHOP_INFO.name)}</div>
     <div style="font-size:0.78em;color:#333;margin-top:2px;">${SHOP_INFO.staff.map(p=>`${escapeHtml(p.name)} ${escapeHtml(p.phone)}`).join(' · ')}</div>
@@ -4418,6 +4504,7 @@ function buildBillHtmlCompact(record, kind, senderName, address){
   </div>
   <div style="font-size:0.72em;color:#5C6255;text-align:right;">(${thaiBahtText(amount)})</div>
   <div style="text-align:right;font-size:0.8em;color:#333;margin-top:8px;">ผู้ส่งของ ${escapeHtml(senderName||'')}</div>
+  </div>
   `;
 }
 
@@ -4572,7 +4659,10 @@ function openTaskBillModal(taskId){
 function openDebtorBillModal(customerId){
   const c = state.customers.find(x=>x.id===customerId);
   if(!c){ showSaveError('ไม่พบลูกค้ารายนี้'); return; }
-  if(Number(c.debt||0)<=0){ showSaveError('ลูกค้ารายนี้ไม่มียอดค้างชำระเป็นเงิน'); return; }
+  // used to require money debt specifically — cylinder-only debtors (debt===0 but gasCylinders>0)
+  // got no way to generate any document at all from this tab. Now allows either kind, so the
+  // "ใบปิดแจ้งหนี้ (ติดถังแก๊ส)" notice option is reachable for pure-cylinder debtors too.
+  if(Number(c.debt||0)<=0 && Number(c.gasCylinders||0)<=0){ showSaveError('ลูกค้ารายนี้ไม่มียอดค้างชำระ'); return; }
   const gasNote = Number(c.gasCylinders||0)>0 ? ` (ยังมีถังค้างคืนอีก ${c.gasCylinders} ใบ แยกจากยอดนี้)` : '';
   const record = {
     customerId: c.id,
@@ -5169,16 +5259,20 @@ function openGasBreakdownModal(){
 
 function renderDebtorRow(c){
   const isExpanded = debtorExpandedIds.has(c.id);
+  const clockInfo = getCustomerDebtClockInfo(c.id);
+  const clockLine = clockInfo ? `<div class="rem-meta" style="margin-top:2px;">${fmtDateShort(clockInfo.date)}(${clockInfo.days}วันก่อน)</div>` : '';
   return `
   <div class="card" style="padding:10px 14px;">
     <div style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;" data-toggle-debtor="${c.id}">
-      <div style="font-weight:700;">👤 ${escapeHtml(c.name)}</div>
+      <div style="font-weight:700;">👤 ${escapeHtml(c.name)}${isCustomerBlacklisted(c.id)? ` <span style="color:var(--red);font-size:11px;font-weight:700;">🚫 บัญชีดำ</span>` : ''}</div>
       <div style="display:flex;align-items:center;gap:8px;">
         ${Number(c.debt||0)>0? `<span class="tag debt">฿${fmtMoney(c.debt)}</span>`:''}
         ${Number(c.gasCylinders||0)>0? `<span class="tag gas">${c.gasCylinders} ถัง</span>`:''}
         <span style="color:var(--ink-soft);">${isExpanded?'▲':'▼'}</span>
       </div>
     </div>
+    ${clockLine}
+    ${c.phone? `<a href="tel:${escapeAttr(c.phone)}" style="display:inline-block;margin-top:4px;color:var(--orange-dark);font-weight:600;text-decoration:none;" onclick="event.stopPropagation();">📞 ${escapeHtml(c.phone)}</a>` : ''}
     ${isExpanded? `<div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:10px;">${renderCustomerCard(c, {showClearAll:true, showInvoiceBtn:true})}</div>` : ''}
   </div>`;
 }
@@ -5195,8 +5289,9 @@ function renderDebtors(){
   const totalMoney = debtors.reduce((a,c)=>a+Number(c.debt||0),0);
   const totalGas = debtors.reduce((a,c)=>a+Number(c.gasCylinders||0),0);
 
+  const blacklistCount = debtors.filter(c=>isCustomerBlacklisted(c.id)).length;
   const activeSummary = [];
-  if(debtorsFilterType!=='all') activeSummary.push({debtOnly:'เฉพาะหนี้เงิน',gasOnly:'เฉพาะถังค้าง'}[debtorsFilterType]);
+  if(debtorsFilterType!=='all') activeSummary.push({debtOnly:'เฉพาะหนี้เงิน',gasOnly:'เฉพาะถังค้าง',blacklist:'🚫 บัญชีดำ'}[debtorsFilterType]);
   if(debtorsDateFilter==='today') activeSummary.push('หนี้ใหม่วันนี้');
   else if(debtorsDateFilter==='custom') activeSummary.push('หนี้ใหม่วันที่ '+fmtDateShort(debtorsCustomDate));
   const sortLabels = {total:'รวมหนักสุด',name:'ชื่อ',debt:'ยอดหนี้',gas:'ถังค้าง',recent:'ลูกค้ารายล่าสุด'};
@@ -5210,13 +5305,14 @@ function renderDebtors(){
 
   let panel = '';
   if(debtorsFilterOpen){
-    const filterChips = [['all','ทั้งหมด'],['debtOnly','เฉพาะหนี้เงิน'],['gasOnly','เฉพาะถังค้าง']];
+    const filterChips = [['all','ทั้งหมด'],['debtOnly','เฉพาะหนี้เงิน'],['gasOnly','เฉพาะถังค้าง'],['blacklist',`🚫 บัญชีดำ${blacklistCount? ` (${blacklistCount})` : ''}`]];
     const dateChips = [['all','ทั้งหมด'],['today','ของวันนี้'],['custom','เลือกวัน']];
     const sortOptions = [['total','รวมหนักสุด'],['name','ชื่อ'],['debt','ยอดหนี้'],['gas','ถังค้าง'],['recent','เพิ่มล่าสุด']];
     panel = `
       <div class="stamp-card" style="margin-bottom:12px;">
         <div class="rem-meta" style="margin-bottom:6px;font-weight:700;">กรอง</div>
-        <div class="btnrow" style="margin-bottom:10px;">${filterChips.map(([k,l])=>`<button class="btn ${debtorsFilterType===k?'primary':'ghost'} small" data-debtor-filter="${k}">${l}</button>`).join('')}</div>
+        <div class="btnrow" style="margin-bottom:6px;">${filterChips.map(([k,l])=>`<button class="btn ${debtorsFilterType===k?'primary':'ghost'} small" data-debtor-filter="${k}">${l}</button>`).join('')}</div>
+        <div class="rem-meta" style="margin-bottom:10px;">🚫 บัญชีดำ = ยังติดหนี้เงินหรือถัง และไม่ได้ทยอยจ่ายคืน/คืนถังเลยเกิน ${DEBTOR_BLACKLIST_INACTIVE_DAYS} วัน (สั่งของเพิ่มไม่นับ ต้องจ่ายคืนหรือคืนถังจริงถึงจะรีเซ็ต)</div>
         <div class="rem-meta" style="margin-bottom:6px;font-weight:700;">กรองตามวันที่เป็นหนี้ใหม่</div>
         <div class="btnrow" style="margin-bottom:${debtorsDateFilter==='custom'?'8px':'10px'};">${dateChips.map(([k,l])=>`<button class="btn ${debtorsDateFilter===k?'primary':'ghost'} small" data-debtor-date-filter="${k}">${l}</button>`).join('')}</div>
         ${debtorsDateFilter==='custom'? `<div class="field" style="margin-bottom:10px;"><input type="date" id="debtorCustomDateInput" value="${debtorsCustomDate}"></div>` : ''}
@@ -5231,6 +5327,7 @@ function renderDebtors(){
   if(q){ debtors = debtors.filter(c=> c.name.toLowerCase().includes(q) || (c.phone||'').toLowerCase().includes(q)); }
   if(debtorsFilterType==='debtOnly') debtors = debtors.filter(c=>Number(c.debt||0)>0);
   else if(debtorsFilterType==='gasOnly') debtors = debtors.filter(c=>Number(c.gasCylinders||0)>0);
+  else if(debtorsFilterType==='blacklist') debtors = debtors.filter(c=>isCustomerBlacklisted(c.id));
   if(debtorsDateFilter==='today') debtors = debtors.filter(c=>customerHasNewDebtOnDate(c.id, todayISO()));
   else if(debtorsDateFilter==='custom') debtors = debtors.filter(c=>customerHasNewDebtOnDate(c.id, debtorsCustomDate));
 
@@ -5404,6 +5501,7 @@ function renderTasks(){
     const hasPrachanatCredit = cust && Number(cust.prachanatCredit||0)>0 && getShowPrachanatTaskIcon();
     // per user's request: drop the urgency wording/elapsed-time text (the colored emoji next to
     // the name is enough on its own) and show ซอย/หมู่/จุดสังเกต here instead, same text size
+    const taskHouseNo = cust? cust.houseNo : t.houseNo;
     const taskSoi = cust? cust.soi : t.soi;
     const taskMoo = cust? cust.moo : t.moo;
     const taskLandmark = cust? cust.landmark : t.landmark;
@@ -5425,7 +5523,7 @@ function renderTasks(){
             ${navLink? `<a class="btn ghost small" href="${navLink}" target="_blank" rel="noopener" style="text-decoration:none;">🧭 นำทาง</a>` : ''}
           </div>
         </div>
-        <div class="rem-meta">ซอย ${taskSoi? escapeHtml(taskSoi) : '-'} · หมู่ ${taskMoo? escapeHtml(taskMoo) : '-'} · 🏠 ${taskLandmark? escapeHtml(taskLandmark) : '-'}</div>
+        <div class="rem-meta">${taskHouseNo? escapeHtml(taskHouseNo)+' · ' : ''}ซอย ${taskSoi? escapeHtml(taskSoi) : '-'} · หมู่ ${taskMoo? escapeHtml(taskMoo) : '-'} · 🏠 ${taskLandmark? escapeHtml(taskLandmark) : '-'}</div>
         ${t.gasBreakdown && sumGasBreakdown(t.gasBreakdown)>0? `<div class="rem-meta">${gasBrandIconsHtml(t.gasBreakdown, 16) || '🛢️'} ${gasBreakdownSummary(t.gasBreakdown)}</div>` : ''}
         ${truckShortfall.length? `<div class="rem-meta" style="color:var(--red);font-weight:600;">⚠️ ถังในรถไม่พอ: ${truckShortfall.map(s=>`${GAS_BRAND_LABELS[s.brand]} ${s.size}kg ขาด ${s.need-s.have} (มี ${s.have}/${s.need})`).join(', ')}</div>` : ''}
         ${t.otherItems && t.otherItems.length? `<div class="rem-meta">🧰 ${otherItemsSummary(t.otherItems)}</div>` : ''}
@@ -5452,7 +5550,7 @@ function taskCustInfoBlockHtml(cust){
   if(!cust) return '';
   return `
     <div class="rem-meta">📞 ${cust.phone? escapeHtml(cust.phone) : 'ไม่มีเบอร์'} · 📍 ${cust.address? escapeHtml(cust.address) : 'ไม่มีที่อยู่/ลิงก์แผนที่'}</div>
-    <div class="rem-meta">ซอย ${cust.soi? escapeHtml(cust.soi) : '-'} · หมู่ ${cust.moo? escapeHtml(cust.moo) : '-'} · จุดสังเกต ${cust.landmark? escapeHtml(cust.landmark) : '-'}</div>
+    <div class="rem-meta">${cust.houseNo? 'บ้านเลขที่ '+escapeHtml(cust.houseNo)+' · ' : ''}ซอย ${cust.soi? escapeHtml(cust.soi) : '-'} · หมู่ ${cust.moo? escapeHtml(cust.moo) : '-'} · จุดสังเกต ${cust.landmark? escapeHtml(cust.landmark) : '-'}</div>
   `;
 }
 
@@ -5463,6 +5561,9 @@ function openTaskForm(editId){
   const soiOptions = getKnownFieldValues('soi');
   const mooOptions = getKnownFieldValues('moo');
   const landmarkOptions = getKnownFieldValues('landmark');
+  // phone/houseNo/soi/moo start folded away (only landmark+address stay visible up top) unless this
+  // task already has one of those values filled in — then show them open so nothing looks "lost"
+  const hasExtraCustDetails = !!(editing && (editing.phone || editing.houseNo || editing.soi || editing.moo));
   const initialUrgencyMode = (editing && editing.urgencyMode) ? editing.urgencyMode : 'auto';
   const body = `
     <h3>${editing? 'แก้ไขงานส่งของ' : 'เพิ่มงานส่งของ'}</h3>
@@ -5473,37 +5574,50 @@ function openTaskForm(editId){
         <input type="hidden" id="f_taskCustomerId" value="${editingCust? editingCust.id : ''}">
         <div id="taskCustSuggestions" style="margin-top:6px;"></div>
       </div>
+      <div id="newCustomerLandmarkField" class="field-row" style="${editingCust? 'display:none;':''}">
+        <div class="field">
+          <label>สิ่งที่นึกถึง / จุดสังเกต</label>
+          <input id="f_taskLandmark" list="taskLandmarkList" value="${editing? escapeAttr(editing.landmark||''):''}" placeholder="เช่น บ้านสีฟ้า ตรงข้ามวัด" autocomplete="off">
+          <datalist id="taskLandmarkList">${landmarkOptions.map(v=>`<option value="${escapeAttr(v)}">`).join('')}</datalist>
+        </div>
+        <div class="field">
+          <label>ที่อยู่/ลิงก์แผนที่ (ถ้ามี)</label>
+          <input id="f_taskAddress" value="${editing? escapeAttr(editing.address||''):''}">
+        </div>
+      </div>
       <div class="field"><label>ถังที่จะส่ง</label>${lineItemBuilderHtml('taskLine', editing? breakdownToLineItems(editing.gasBreakdown) : [])}</div>
-      <div class="field"><label>สินค้าอื่นๆ (ถ้ามี)</label>${otherProductLineBuilderHtml('taskOtherLine', editing? (editing.otherItems||[]) : [])}</div>
+      <div class="field">
+        <div style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;" id="toggleTaskOtherProducts">
+          <label style="margin:0;">สินค้าอื่นๆ (ถ้ามี)</label>
+          <span id="taskOtherProductsToggleIcon" style="color:var(--ink-soft);">${(editing && editing.otherItems && editing.otherItems.length)? '▲' : '▼'}</span>
+        </div>
+        <div id="taskOtherProductsBox" style="${(editing && editing.otherItems && editing.otherItems.length)? '' : 'display:none;'}margin-top:6px;">${otherProductLineBuilderHtml('taskOtherLine', editing? (editing.otherItems||[]) : [])}</div>
+      </div>
       <div id="existingCustInfoBlock" class="stamp-card" style="margin-bottom:10px;${editingCust? '':'display:none;'}">
         <div class="rem-meta" style="font-weight:700;margin-bottom:4px;">ข้อมูลลูกค้า (ไม่ได้หายไปไหน — แก้ไขได้ที่หน้าลูกค้าโดยตรง)</div>
         <div id="existingCustInfoContent">${taskCustInfoBlockHtml(editingCust)}</div>
         <button type="button" class="btn ghost small" id="editLinkedCustBtn" style="margin-top:6px;">✏️ แก้ไขข้อมูลลูกค้าคนนี้</button>
       </div>
-      <div id="newCustomerFields" style="${editingCust? 'display:none;':''}">
-        <div class="field-row">
+      <div id="newCustomerFields" class="field" style="${editingCust? 'display:none;':''}">
+        <div style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;" id="toggleNewCustomerDetails">
+          <label style="margin:0;">รายละเอียดเพิ่มเติม (เบอร์/บ้านเลขที่/ซอย/หมู่)</label>
+          <span id="newCustomerDetailsToggleIcon" style="color:var(--ink-soft);">${hasExtraCustDetails? '▲' : '▼'}</span>
+        </div>
+        <div id="newCustomerDetailsBox" style="${hasExtraCustDetails? '' : 'display:none;'}margin-top:6px;">
           <div class="field"><label>เบอร์โทร (ถ้ามี)</label><input id="f_taskPhone" value="${editing? escapeAttr(editing.phone||''):''}"></div>
-          <div class="field"><label>ที่อยู่/ลิงก์แผนที่ (ถ้ามี)</label><input id="f_taskAddress" value="${editing? escapeAttr(editing.address||''):''}"></div>
-        </div>
-        <div class="field-row">
-          <div class="field">
-            <label>ซอย (ตัวเลข หรือ ตัวเลข/ตัวเลข เช่น 3/3)</label>
-            <div style="display:flex;gap:6px;">
-              <input id="f_taskSoi" list="taskSoiList" inputmode="numeric" pattern="[0-9/]*" oninput="this.value=this.value.replace(/[^0-9/]/g,'')" value="${editing? escapeAttr(stripSoiChars(editing.soi)):''}" placeholder="เช่น 5 หรือ 3/3" autocomplete="off" style="flex:1;">
-              <button type="button" class="btn ghost small" data-insert-char="/" data-insert-target="f_taskSoi" style="padding:0 16px;">/</button>
+          <div class="field"><label>บ้านเลขที่</label><input id="f_taskHouseNo" value="${editing? escapeAttr(editing.houseNo||''):''}" placeholder="เช่น 12/3" autocomplete="off"></div>
+          <div class="field-row">
+            <div class="field">
+              <label>ซอย</label>
+              <input id="f_taskSoi" list="taskSoiList" value="${editing? escapeAttr(editing.soi||''):''}" placeholder="เช่น 5 หรือ 3/3" autocomplete="off">
+              <datalist id="taskSoiList">${soiOptions.map(v=>`<option value="${escapeAttr(v)}">`).join('')}</datalist>
             </div>
-            <datalist id="taskSoiList">${soiOptions.map(v=>`<option value="${escapeAttr(v)}">`).join('')}</datalist>
+            <div class="field">
+              <label>หมู่</label>
+              <input id="f_taskMoo" list="taskMooList" inputmode="numeric" pattern="[0-9]*" oninput="this.value=this.value.replace(/[^0-9]/g,'')" value="${editing? escapeAttr(stripToDigits(editing.moo)):''}" placeholder="เช่น 3" autocomplete="off">
+              <datalist id="taskMooList">${mooOptions.map(v=>`<option value="${escapeAttr(v)}">`).join('')}</datalist>
+            </div>
           </div>
-          <div class="field">
-            <label>หมู่ (ตัวเลขเท่านั้น)</label>
-            <input id="f_taskMoo" list="taskMooList" inputmode="numeric" pattern="[0-9]*" oninput="this.value=this.value.replace(/[^0-9]/g,'')" value="${editing? escapeAttr(stripToDigits(editing.moo)):''}" placeholder="เช่น 3" autocomplete="off">
-            <datalist id="taskMooList">${mooOptions.map(v=>`<option value="${escapeAttr(v)}">`).join('')}</datalist>
-          </div>
-        </div>
-        <div class="field">
-          <label>สิ่งที่นึกถึง / จุดสังเกต</label>
-          <input id="f_taskLandmark" list="taskLandmarkList" value="${editing? escapeAttr(editing.landmark||''):''}" placeholder="เช่น บ้านสีฟ้า ตรงข้ามวัด" autocomplete="off">
-          <datalist id="taskLandmarkList">${landmarkOptions.map(v=>`<option value="${escapeAttr(v)}">`).join('')}</datalist>
         </div>
       </div>
       <div class="field">
@@ -5532,6 +5646,22 @@ function openTaskForm(editId){
   showModal(body);
   renderLineItemsBox('taskLine');
   renderOtherLineItemsBox('taskOtherLine');
+  const toggleTaskOtherProducts = document.getElementById('toggleTaskOtherProducts');
+  if(toggleTaskOtherProducts) toggleTaskOtherProducts.addEventListener('click', ()=>{
+    const box = document.getElementById('taskOtherProductsBox');
+    const icon = document.getElementById('taskOtherProductsToggleIcon');
+    const isOpen = box.style.display !== 'none';
+    box.style.display = isOpen? 'none' : '';
+    icon.textContent = isOpen? '▼' : '▲';
+  });
+  const toggleNewCustomerDetails = document.getElementById('toggleNewCustomerDetails');
+  if(toggleNewCustomerDetails) toggleNewCustomerDetails.addEventListener('click', ()=>{
+    const box = document.getElementById('newCustomerDetailsBox');
+    const icon = document.getElementById('newCustomerDetailsToggleIcon');
+    const isOpen = box.style.display !== 'none';
+    box.style.display = isOpen? 'none' : '';
+    icon.textContent = isOpen? '▼' : '▲';
+  });
 
   // button-only urgency picker — emoji only appear once the popover opens. Kept form-local (no
   // showModal/closeModal calls, which would wipe out the rest of this very form since the app
@@ -5567,6 +5697,7 @@ function openTaskForm(editId){
   const nameInput = document.getElementById('f_taskCustName');
   const suggestBox = document.getElementById('taskCustSuggestions');
   const newFieldsDiv = document.getElementById('newCustomerFields');
+  const newLandmarkFieldDiv = document.getElementById('newCustomerLandmarkField');
   const custInfoBlock = document.getElementById('existingCustInfoBlock');
   const custInfoContent = document.getElementById('existingCustInfoContent');
   const editLinkedCustBtn = document.getElementById('editLinkedCustBtn');
@@ -5588,6 +5719,7 @@ function openTaskForm(editId){
         nameInput.value = picked.name;
         suggestBox.innerHTML = '';
         newFieldsDiv.style.display = 'none';
+        if(newLandmarkFieldDiv) newLandmarkFieldDiv.style.display = 'none';
         custInfoContent.innerHTML = taskCustInfoBlockHtml(picked);
         custInfoBlock.style.display = '';
       });
@@ -5596,6 +5728,7 @@ function openTaskForm(editId){
   nameInput.addEventListener('input', ()=>{
     document.getElementById('f_taskCustomerId').value = '';
     newFieldsDiv.style.display = '';
+    if(newLandmarkFieldDiv) newLandmarkFieldDiv.style.display = '';
     custInfoBlock.style.display = 'none';
     renderSuggestions();
   });
@@ -5628,7 +5761,8 @@ function openTaskForm(editId){
       customName: customerId? null : typedName,
       phone: customerId? '' : document.getElementById('f_taskPhone').value.trim(),
       address: customerId? '' : document.getElementById('f_taskAddress').value.trim(),
-      soi: customerId? '' : stripSoiChars(document.getElementById('f_taskSoi').value),
+      houseNo: customerId? '' : document.getElementById('f_taskHouseNo').value.trim(),
+      soi: customerId? '' : document.getElementById('f_taskSoi').value.trim(),
       moo: customerId? '' : stripToDigits(document.getElementById('f_taskMoo').value),
       landmark: customerId? '' : document.getElementById('f_taskLandmark').value.trim(),
       urgencyMode: document.getElementById('f_taskUrgencyMode').value,
@@ -5796,6 +5930,7 @@ function openTaskCompleteForm(taskId){
         name: displayName,
         phone: t.phone || '',
         address: t.address || '',
+        houseNo: t.houseNo || '',
         soi: t.soi || '',
         moo: t.moo || '',
         landmark: t.landmark || '',
@@ -6029,24 +6164,6 @@ document.getElementById('modalRoot').addEventListener('click', e=>{
   if(el) el.value = btn.dataset.qtyVal;
 });
 
-// delegated once — inserts a character at the cursor position of a target field, for symbols that
-// mobile numeric keypads don't show a key for (e.g. "/" in the ซอย field, which uses inputmode="numeric"
-// so the on-screen keyboard is digits-only and there's no way to type "/" without this)
-document.getElementById('modalRoot').addEventListener('click', e=>{
-  const btn = e.target.closest('[data-insert-char]');
-  if(!btn) return;
-  const el = document.getElementById(btn.dataset.insertTarget);
-  if(!el) return;
-  const ch = btn.dataset.insertChar;
-  const start = el.selectionStart!=null? el.selectionStart : el.value.length;
-  const end = el.selectionEnd!=null? el.selectionEnd : el.value.length;
-  el.value = el.value.slice(0,start) + ch + el.value.slice(end);
-  el.focus();
-  const newPos = start + ch.length;
-  try{ el.setSelectionRange(newPos, newPos); }catch(err){}
-  el.dispatchEvent(new Event('input', { bubbles:true }));
-});
-
 // inline calculator: every numeric field in the app is a plain text input (see the global
 // type="number" -> type="text" inputmode="decimal" swap) specifically so people can type a quick
 // sum like "334*3" or "500-166" straight into any amount/quantity box. When the field loses focus,
@@ -6265,6 +6382,10 @@ function openDangerousDeleteConfirm(title, itemName, onConfirm){
 /* ---------------- delegated handlers ---------------- */
 function attachHandlers(){
   document.querySelectorAll('[data-goto-tab]').forEach(el=>el.addEventListener('click', ()=> switchTab(el.dataset.gotoTab)));
+  document.querySelectorAll('[data-goto-debtors-blacklist]').forEach(el=>el.addEventListener('click', ()=>{
+    debtorsFilterType = 'blacklist';
+    switchTab('debtors');
+  }));
   const editPricesBtn = document.getElementById('editPricesBtn');
   if(editPricesBtn) editPricesBtn.addEventListener('click', openEditPricesForm);
   const otherProductSelect = document.getElementById('otherProductSelect');
