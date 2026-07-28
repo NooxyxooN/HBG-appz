@@ -423,6 +423,15 @@ function fmtDateShort(iso){
   const d = new Date(iso+'T00:00:00');
   return d.toLocaleDateString('th-TH',{day:'2-digit',month:'2-digit',year:'2-digit'});
 }
+// compact "วัน/เดือน/ปี ชม:นาที" stamp — used to show when a delivery task was actually added
+// (as opposed to just the date), so it's clear what time an order came in
+function fmtDateTimeShort(ms){
+  if(!ms) return '';
+  const d = new Date(ms);
+  const dateStr = d.toLocaleDateString('th-TH',{day:'2-digit',month:'2-digit',year:'2-digit'});
+  const timeStr = d.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit',hour12:false});
+  return `${dateStr} ${timeStr}`;
+}
 function mapsUrl(addr){
   if(!addr) return null;
   if(/^https?:\/\//i.test(addr)) return addr;
@@ -5511,6 +5520,9 @@ function renderTasks(){
       const coord = coordFromAddress(address);
       if(coord) cardDistKm = haversineKm(truckPinCoord, coord);
     }
+    // small "added at" stamp so it's clear what time/day the order came in — falls back to the
+    // date-only createdAt for old tasks saved before addedAt existed
+    const addedAtStr = t.addedAt? fmtDateTimeShort(t.addedAt) : (t.createdAt? fmtDateShort(t.createdAt) : '');
     return `
     <div class="card rem-card">
       <div class="checkbox" data-complete-task="${t.id}" style="cursor:pointer;"></div>
@@ -5523,6 +5535,7 @@ function renderTasks(){
             ${navLink? `<a class="btn ghost small" href="${navLink}" target="_blank" rel="noopener" style="text-decoration:none;">🧭 นำทาง</a>` : ''}
           </div>
         </div>
+        ${addedAtStr? `<div class="rem-meta" style="font-size:11px;color:var(--ink-soft);">🕐 เพิ่มเมื่อ ${addedAtStr}</div>` : ''}
         <div class="rem-meta">${taskHouseNo? escapeHtml(taskHouseNo)+' · ' : ''}ซอย ${taskSoi? escapeHtml(taskSoi) : '-'} · หมู่ ${taskMoo? escapeHtml(taskMoo) : '-'} · 🏠 ${taskLandmark? escapeHtml(taskLandmark) : '-'}</div>
         ${t.gasBreakdown && sumGasBreakdown(t.gasBreakdown)>0? `<div class="rem-meta">${gasBrandIconsHtml(t.gasBreakdown, 16) || '🛢️'} ${gasBreakdownSummary(t.gasBreakdown)}</div>` : ''}
         ${truckShortfall.length? `<div class="rem-meta" style="color:var(--red);font-weight:600;">⚠️ ถังในรถไม่พอ: ${truckShortfall.map(s=>`${GAS_BRAND_LABELS[s.brand]} ${s.size}kg ขาด ${s.need-s.have} (มี ${s.have}/${s.need})`).join(', ')}</div>` : ''}
