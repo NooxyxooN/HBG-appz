@@ -6163,11 +6163,65 @@ function toggleReminder(id){
 function showModal(innerHtml){
   const root = document.getElementById('modalRoot');
   root.innerHTML = `<div class="modal-overlay" id="overlay"><div class="modal">${innerHtml}</div></div>`;
-  document.getElementById('overlay').addEventListener('click', e=>{ if(e.target.id==='overlay') closeModal(); });
+  // tapping the dark backdrop used to close the modal instantly, silently throwing away anything
+  // half-typed in a form (this is exactly what happened with "เพิ่มงานส่งของ" — a stray tap outside
+  // while typing wiped the whole entry). Now: if the modal contains a <form> with any field the user
+  // has actually changed from its starting value, ask first instead of closing straight away.
+  document.getElementById('overlay').addEventListener('click', e=>{
+    if(e.target.id!=='overlay') return;
+    const form = root.querySelector('form');
+    if(form && formHasUnsavedChanges(form)){ showUnsavedChangesPrompt(form); return; }
+    closeModal();
+  });
   const cancelBtn = document.getElementById('cancelModal');
   if(cancelBtn) cancelBtn.addEventListener('click', closeModal);
 }
 function closeModal(){ document.getElementById('modalRoot').innerHTML=''; }
+
+// true if any visible text-ish field inside the form no longer matches the value it was rendered
+// with — i.e. the user actually typed/changed something, as opposed to an empty or untouched form
+function formHasUnsavedChanges(form){
+  const fields = form.querySelectorAll('input, textarea');
+  for(const el of fields){
+    if(el.type==='hidden' || el.type==='checkbox' || el.type==='radio' || el.type==='button' || el.type==='submit') continue;
+    if(el.value !== el.defaultValue) return true;
+  }
+  return false;
+}
+
+// small confirm dialog stacked ON TOP of the still-open form (does not touch modalRoot, so nothing
+// typed is lost) — lets the user pick "add it anyway" (submits the form as-is) or "discard" (closes
+// for real), instead of the old behavior of silently discarding on any outside tap
+function showUnsavedChangesPrompt(form){
+  const existing = document.getElementById('unsavedPromptOverlay');
+  if(existing) existing.remove();
+  const div = document.createElement('div');
+  div.id = 'unsavedPromptOverlay';
+  div.className = 'modal-overlay';
+  div.style.zIndex = '40';
+  div.innerHTML = `
+    <div class="modal" style="max-width:360px;">
+      <h3>ยังไม่ได้บันทึก</h3>
+      <div class="rem-meta" style="margin-bottom:14px;">มีข้อมูลที่พิมพ์ไว้ยังไม่ได้บันทึก ต้องการเพิ่มเข้ารายการเลยมั้ย หรือจะละทิ้งข้อมูลนี้?</div>
+      <div class="btnrow" style="flex-direction:column;align-items:stretch;gap:8px;">
+        <button type="button" class="btn primary" id="unsavedPromptSubmit">✅ เพิ่มเข้ารายการ</button>
+        <button type="button" class="btn danger" id="unsavedPromptDiscard">🗑️ ละทิ้ง</button>
+        <button type="button" class="btn ghost" id="unsavedPromptCancel">กลับไปพิมพ์ต่อ</button>
+      </div>
+    </div>`;
+  document.body.appendChild(div);
+  document.getElementById('unsavedPromptSubmit').addEventListener('click', ()=>{
+    div.remove();
+    if(form.requestSubmit) form.requestSubmit();
+    else form.dispatchEvent(new Event('submit', {cancelable:true, bubbles:true}));
+  });
+  document.getElementById('unsavedPromptDiscard').addEventListener('click', ()=>{
+    div.remove();
+    closeModal();
+  });
+  document.getElementById('unsavedPromptCancel').addEventListener('click', ()=> div.remove());
+  div.addEventListener('click', e=>{ if(e.target===div) div.remove(); });
+}
 
 // delegated once, works for quick-quantity buttons in any form rendered inside the modal
 document.getElementById('modalRoot').addEventListener('click', e=>{
