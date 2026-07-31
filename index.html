@@ -687,21 +687,48 @@ function isCustomerBlacklisted(customerId){
 }
 
 async function init(){
-  state.customers = await loadData('customers', []);
-  state.sales = await loadData('sales', []);
-  state.reminders = await loadData('reminders', []);
-  state.tasks = await loadData('tasks', []);
-  state.purchases = await loadData('purchases', []);
-  state.transactions = await loadData('transactions', []);
-  state.gasPrices = await loadData('gasPrices', {4:0,7:0,15:0,48:0});
-  state.pickupDiscount = await loadData('pickupDiscount', {4:10,7:10,15:20,48:20});
-  state.inventory = await loadData('inventory', emptyInventory());
-  state.dailySummaries = await loadData('dailySummaries', {});
-  state.otherProducts = await loadData('otherProducts', DEFAULT_OTHER_PRODUCTS);
-  state.truckStock = await loadData('truckStock', []);
-  state.inventoryAdjustments = await loadData('inventoryAdjustments', []);
-  state.shopCoord = await loadData('shopCoord', null);
-  state.dailyNotes = await loadData('dailyNotes', {});
+  // all 15 collections used to load ONE AT A TIME (await in sequence) — each is its own Firestore
+  // round-trip, so total wait was the SUM of all 15 request times. That's exactly what made the app
+  // feel slower and slower to open as more data piled up over time. Firing them all at once with
+  // Promise.all cuts the wait down to roughly the time of the single slowest request instead —
+  // loadData() already catches its own errors and always resolves (never rejects) with a fallback,
+  // so this is safe to parallelize.
+  const [
+    customers, sales, reminders, tasks, purchases, transactions,
+    gasPrices, pickupDiscount, inventory, dailySummaries, otherProducts,
+    truckStock, inventoryAdjustments, shopCoord, dailyNotes
+  ] = await Promise.all([
+    loadData('customers', []),
+    loadData('sales', []),
+    loadData('reminders', []),
+    loadData('tasks', []),
+    loadData('purchases', []),
+    loadData('transactions', []),
+    loadData('gasPrices', {4:0,7:0,15:0,48:0}),
+    loadData('pickupDiscount', {4:10,7:10,15:20,48:20}),
+    loadData('inventory', emptyInventory()),
+    loadData('dailySummaries', {}),
+    loadData('otherProducts', DEFAULT_OTHER_PRODUCTS),
+    loadData('truckStock', []),
+    loadData('inventoryAdjustments', []),
+    loadData('shopCoord', null),
+    loadData('dailyNotes', {})
+  ]);
+  state.customers = customers;
+  state.sales = sales;
+  state.reminders = reminders;
+  state.tasks = tasks;
+  state.purchases = purchases;
+  state.transactions = transactions;
+  state.gasPrices = gasPrices;
+  state.pickupDiscount = pickupDiscount;
+  state.inventory = inventory;
+  state.dailySummaries = dailySummaries;
+  state.otherProducts = otherProducts;
+  state.truckStock = truckStock;
+  state.inventoryAdjustments = inventoryAdjustments;
+  state.shopCoord = shopCoord;
+  state.dailyNotes = dailyNotes;
   migrateNumericSoiMoo();
   migrateAddNewDefaultProducts();
   migrateTruckStockShape();
