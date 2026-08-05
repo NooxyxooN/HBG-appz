@@ -497,7 +497,7 @@ let debtorExpandedIds = new Set();
 let customersSort = 'name';
 let debtorsSort = 'total';
 let rankSort = 'gas';
-let tasksSort = 'urgency';
+let tasksSort = 'order';
 // ephemeral GPS snapshot of the truck's position "right now" — deliberately NOT persisted to
 // Firestore, since it only answers "how far/which way from where I'm standing this instant", not
 // a fixed reference point like the shop. Resets whenever the app is reloaded, which is fine.
@@ -733,6 +733,7 @@ async function init(){
   migrateAddNewDefaultProducts();
   migrateTruckStockShape();
   migrateDailyNotesShape();
+  migrateFixGasCylindersScalarMismatch();
   state.loaded = true;
   document.getElementById('todayLabel').textContent = new Date().toLocaleDateString('th-TH',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
   render();
@@ -799,6 +800,28 @@ function openShareModal(){
       document.getElementById('copyUrlBtn').textContent = 'คัดลอกไม่สำเร็จ ลองคัดลอกด้วยมือ';
     });
   });
+}
+
+// one-time repair: performMergeCustomers() used to update gasCylindersBreakdown (the itemized
+// size/brand list) when merging duplicate customers, but never touched gasCylinders (the plain
+// scalar count) to match — so any cylinders belonging to a merged-away customer got added into the
+// itemized breakdown but silently dropped from the scalar total. That scalar is what the "ถังยืม"
+// dashboard total and every customer/debtor list actually sorts and sums by, so the visible headline
+// number came out LOWER than the itemized ธรรมดา+ปตท breakdown next to it — exactly the "ถังรวม 114
+// ธรรมดา 88 ปตท 33" mismatch (88+33=121, not 114) reported. This brings every existing customer's
+// scalar back up to at least what their itemized breakdown already adds up to, for anyone merged
+// before the fix above went in. Only ever raises the scalar (never lowers it), so it can't discard
+// a legacy count that has no itemized breakdown at all.
+function migrateFixGasCylindersScalarMismatch(){
+  let changed = false;
+  state.customers.forEach(c=>{
+    const bdSum = sumGasBreakdown(c.gasCylindersBreakdown||[]);
+    if(bdSum > Number(c.gasCylinders||0)){
+      c.gasCylinders = bdSum;
+      changed = true;
+    }
+  });
+  if(changed) persistCustomers();
 }
 
 // one-time cleanup: old หมู่ entries sometimes had text mixed in (e.g. "หมู่3 ") — keep only the
@@ -1110,62 +1133,67 @@ function breakdownToLineItems(b){
   return GAS_SIZES.map(sz=>({ size:sz, brand:getBreakdownBrand(b[sz]), qty:getBreakdownQty(b[sz]) })).filter(i=>i.qty>0);
 }
 
-/* Urgency system: auto-escalates by elapsed time since timerStartAt, unless manually pinned */
-const URGENCY_AUTO_ICONS = { green:'🟢', yellow:'🟡', red:'🔴' };
-// used by the compact circle+popover urgency picker in the Add/Edit Task form
-const TASK_URGENCY_FORM_ICONS = { auto:'🟢🟡🔴', green:'🟢', yellow:'🟡', red:'🔴', paused:'🔵' };
-const TASK_URGENCY_FORM_LABELS = { auto:'อัตโนมัติ (ไล่สีตามเวลาที่รอ)', green:'เขียว (กำหนดเอง)', yellow:'เหลือง (กำหนดเอง)', red:'แดง (กำหนดเอง)', paused:'พักไว้ก่อน (รอ activate)' };
-const URGENCY_AUTO_LABELS = { green:'ปกติ (≤30 นาที)', yellow:'รอมานาน (30 นาที - 2ชม.30นาที)', red:'ค้างนาน (2ชม.30นาทีขึ้นไป)' };
-function getTaskUrgencyState(t){
-  if(t.urgencyMode === 'paused') return 'paused';
-  if(t.urgencyMode === 'green' || t.urgencyMode === 'yellow' || t.urgencyMode === 'red') return t.urgencyMode;
-  const startedAt = t.timerStartAt || Date.parse(t.createdAt) || Date.now();
-  const elapsedMin = (Date.now() - startedAt) / 60000;
-  if(elapsedMin >= 150) return 'red';
-  if(elapsedMin > 30) return 'yellow';
-  return 'green';
+/* Route-direction badge + manual delivery order — replaces the old elapsed-time urgency system
+   entirely (no more auto color-by-how-long-it's-waited, no time tracking at all). Two independent
+   pieces of info on every task card: (1) an auto-computed 8-direction compass color relative to the
+   shop, purely a visual "which way is this customer" indicator, not tappable; (2) a manually-set
+   order number (1-9) or a paused state, which the driver taps to set — this is what actually gets
+   used to sequence today's deliveries. */
+// same order as COMPASS_SECTORS (เหนือ, ตอ.เฉียงเหนือ, ตะวันออก, ตอ.เฉียงใต้, ใต้, ตต.เฉียงใต้, ตะวันตก, ตต.เฉียงเหนือ)
+const COMPASS_COLORS = ['#B23A2E','#DB6B2A','#D8A32C','#8FA84A','#3C7A5B','#2E8B8B','#3B6FA0','#8B5FA8'];
+function getTaskCompassInfo(t){
+  if(!state.shopCoord) return null;
+  const cust = t.customerId? state.customers.find(c=>c.id===t.customerId) : null;
+  const address = cust? cust.address : t.address;
+  const coord = coordFromAddress(address);
+  if(!coord) return null;
+  const deg = bearingDeg(state.shopCoord, coord);
+  const idx = Math.round(deg/45) % 8;
+  return { idx, color: COMPASS_COLORS[idx], label: COMPASS_SECTORS[idx] };
 }
-function getTaskUrgencyIcon(state_){ return state_==='paused' ? '🔵' : URGENCY_AUTO_ICONS[state_]; }
-function getTaskUrgencyLabel(state_){ return state_==='paused' ? 'พักไว้ (รอ activate)' : URGENCY_AUTO_LABELS[state_]; }
-// quick popup to change a task's status color by tapping its emoji directly, without opening
-// the full edit form
-function openTaskUrgencyPicker(taskId){
+// small colored dot for the compass direction — not a button, just a visual badge with a tooltip
+function compassDotHtml(t){
+  const info = getTaskCompassInfo(t);
+  if(!info) return `<span style="display:inline-block;width:13px;height:13px;border-radius:50%;background:#ccc;vertical-align:middle;" title="ยังไม่รู้ทิศ (ต้องตั้งพิกัดร้าน + ที่อยู่เป็นลิงก์แผนที่)"></span>`;
+  return `<span style="display:inline-block;width:13px;height:13px;border-radius:50%;background:${info.color};vertical-align:middle;" title="ทิศ${info.label}จากร้าน"></span>`;
+}
+// emoji "keycap" numerals — the manual delivery-order badge tapped/set per task
+const ORDER_NUMBER_EMOJIS = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣'];
+function getTaskOrderIcon(t){
+  if(t.manualOrder === 'paused') return '⏸️';
+  if(typeof t.manualOrder === 'number' && t.manualOrder>=1 && t.manualOrder<=9) return ORDER_NUMBER_EMOJIS[t.manualOrder-1];
+  return '⚪'; // not set yet — tap to assign
+}
+// tap the order badge on a task card to open this: pick a manual sequence number (driver decides
+// the day's route order themselves), pause the task (skip for now), or clear back to unset
+function openTaskOrderPicker(taskId){
   const t = state.tasks.find(x=>x.id===taskId);
   if(!t) return;
-  const current = t.urgencyMode || 'auto';
-  const options = [
-    ['auto','🟢🟡🔴 อัตโนมัติ (ไล่สีตามเวลาที่รอ)'],
-    ['green','🟢 เขียว (กำหนดเอง)'],
-    ['yellow','🟡 เหลือง (กำหนดเอง)'],
-    ['red','🔴 แดง (กำหนดเอง)'],
-    ['paused','🔵 พักไว้ก่อน (รอ activate)']
-  ];
+  const current = t.manualOrder;
   const body = `
-    <h3>เปลี่ยนสถานะ</h3>
+    <h3>ลำดับ / สถานะ</h3>
+    <div class="rem-meta" style="margin-bottom:10px;">แตะเลขเพื่อกำหนดลำดับที่จะไปส่งเอง หรือพักงานนี้ไว้ก่อนก็ได้</div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px;">
+      ${ORDER_NUMBER_EMOJIS.map((emoji,i)=>`<button type="button" class="btn ${current===i+1?'primary':'ghost'}" data-pick-task-order="${i+1}" style="font-size:20px;padding:10px 0;">${emoji}</button>`).join('')}
+    </div>
     <div class="btnrow" style="flex-direction:column;align-items:stretch;gap:8px;">
-      ${options.map(([k,l])=>`<button type="button" class="btn ${current===k?'primary':'ghost'}" data-set-urgency-val="${k}" style="text-align:left;">${l}</button>`).join('')}
+      <button type="button" class="btn ${current==='paused'?'primary':'ghost'}" data-pick-task-order="paused">⏸️ พักไว้ก่อน</button>
+      ${current!=null? `<button type="button" class="btn ghost" data-pick-task-order="clear">◯ ไม่กำหนด (ล้างค่า)</button>` : ''}
     </div>
     <div class="btnrow" style="margin-top:14px;">
       <button type="button" class="btn ghost" id="cancelModal">ปิด</button>
     </div>
   `;
   showModal(body);
-  document.querySelectorAll('[data-set-urgency-val]').forEach(b=>b.addEventListener('click', ()=>{
-    const val = b.dataset.setUrgencyVal;
-    const wasPaused = t.urgencyMode === 'paused';
-    t.urgencyMode = val;
-    if(val==='auto' && wasPaused) t.timerStartAt = Date.now(); // matches "Activate": restart the clock
+  document.querySelectorAll('[data-pick-task-order]').forEach(b=>b.addEventListener('click', ()=>{
+    const val = b.dataset.pickTaskOrder;
+    if(val==='paused') t.manualOrder = 'paused';
+    else if(val==='clear') t.manualOrder = null;
+    else t.manualOrder = Number(val);
     persistTasks();
     closeModal();
     render();
   }));
-}
-function formatElapsed(startMs){
-  const min = Math.floor((Date.now() - startMs) / 60000);
-  if(min < 1) return 'เมื่อสักครู่';
-  if(min < 60) return `${min} นาทีที่แล้ว`;
-  const h = Math.floor(min/60), m = min%60;
-  return m>0 ? `${h} ชม. ${m} นาทีที่แล้ว` : `${h} ชม.ที่แล้ว`;
 }
 
 /* ---------------- tab switching ---------------- */
@@ -2860,6 +2888,17 @@ function performMergeCustomers(group, primaryId){
 
   primary.debt = group.reduce((a,c)=>a+Number(c.debt||0), 0);
   primary.gasCylindersBreakdown = mergeGasBreakdowns(group);
+  // BUG FIX: this used to leave primary.gasCylinders (the raw scalar total) completely untouched
+  // after a merge — only the itemized breakdown got the other customers' tanks added in, so any
+  // cylinders belonging to the merged-away customers silently vanished from the scalar count (the
+  // number actually used for the "ถังยืม" dashboard total and every debtor/customer list). That's
+  // exactly why the itemized breakdown (ธรรมดา+ปตท) could add up to MORE than the headline total —
+  // the scalar was stuck at just the primary customer's own old count. Recompute it as the larger of
+  // (a) the itemized breakdown sum, or (b) the raw scalar sum across the whole group — (b) covers
+  // older customers who only ever had a plain count with no size/brand breakdown recorded at all, so
+  // their tanks don't get silently dropped just because they can't be itemized after the fact.
+  const rawGasSum = group.reduce((a,c)=>a+Number(c.gasCylinders||0), 0);
+  primary.gasCylinders = Math.max(sumGasBreakdown(primary.gasCylindersBreakdown), rawGasSum);
 
   ['phone','address','soi','moo','landmark'].forEach(f=>{
     if(!primary[f]){
@@ -3351,12 +3390,17 @@ function openAddDebtPrompt(id){
       return;
     }
     const note = document.getElementById('f_note').value.trim();
-    // these tanks have to come from somewhere physical — pull them out of the shop's own empty-cylinder
-    // slot (not conjured from nowhere) so the stock count stays honest; this was the bug: adding tank
-    // debt here never touched inventory at all, so the "borrowed with customer" count could climb
-    // forever without shop stock ever reflecting it
+    // these tanks have to come from somewhere physical — a customer taking on tank debt means a FULL
+    // cylinder just left the shop (same as a normal delivery with "ค้างถัง" checked), so this must
+    // mirror applyDeliveryToInventory's cylinderPending branch: deduct from FULL, not empty. An
+    // earlier version of this fix deducted from the empty slot instead, which was wrong — no empty
+    // tank leaves the shop at this moment, a full one does. Deducting from the wrong bucket didn't
+    // show up as a grand-total error (it happened to cancel out once the tank was later returned via
+    // openCylinderReturnPrompt, which correctly adds back to empty), but it made the full/empty SPLIT
+    // wrong for as long as the debt was outstanding — the shop's "เต็ม" count looked higher than it
+    // really was, and "เปล่า" looked lower.
     if(gasQty>0){
-      gasItems.forEach(item=>{ inventoryRemoveEmpty(item.size, item.brand, Number(item.qty||0)); });
+      gasItems.forEach(item=>{ inventoryRemoveFull(item.size, item.brand, Number(item.qty||0)); });
       persistInventory();
     }
     adjustCustomerRemote(c.id, fresh=>{
@@ -4178,8 +4222,14 @@ function compactGasBreakdown(b){
 function buildTasksReceiptHtml(){
   const dateStr = new Date().toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'numeric'});
   const timeStr = new Date().toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
-  const stateWeight = { red:0, yellow:1, green:2, paused:3 };
-  let tasks = [...state.tasks].sort((a,b)=> stateWeight[getTaskUrgencyState(a)] - stateWeight[getTaskUrgencyState(b)]);
+  // same weighting as the Tasks-tab default "order" sort: numbered stops ascending first,
+  // unset ones next (by add time), paused ones always last
+  const orderWeight = t=> t.manualOrder==='paused'? 1000 : (typeof t.manualOrder==='number'? t.manualOrder : 100);
+  let tasks = [...state.tasks].sort((a,b)=>{
+    const aw = orderWeight(a), bw = orderWeight(b);
+    if(aw!==bw) return aw-bw;
+    return (a.addedAt||0) - (b.addedAt||0);
+  });
   let html = `<div style="text-align:center;font-weight:bold;font-size:1.15em;margin-bottom:8px;">=== งานส่งวันนี้ ===</div>
   <div style="text-align:center;margin-bottom:18px;">${dateStr} ${timeStr} น.</div>
   <div style="border-top:3px solid #000;margin-bottom:18px;"></div>`;
@@ -4400,7 +4450,10 @@ function shareOrDownloadCanvas(canvas, filename){
 }
 
 /* shared bordered items table (used by both the receipt and the door-notice card) —
-   lists only what was actually ordered, no unused checkbox rows for every gas size */
+   lists only what was actually ordered, no unused checkbox rows for every gas size.
+   Icons here use the line-art (outline-only) versions, not the full-color pixel-art icons used
+   elsewhere in the app — the Peripage printer turns small color icons into solid black blobs, so
+   every printed bill/receipt/notice traces just the icon's outline instead. */
 function buildItemsTableHtml(record, amount){
   const items = breakdownToLineItems(record.gasBreakdown);
   const otherItems = record.otherItems || [];
@@ -4409,7 +4462,7 @@ function buildItemsTableHtml(record, amount){
   const gasRows = items.map(item=>{
     const unitPrice = Number(state.gasPrices[item.size]||0);
     const brandTag = item.brand==='ptt' ? ' (🅿 ปตท)' : '';
-    const icon = iconImgHtml(tankIconSrc(item.brand, item.size), 20);
+    const icon = iconImgHtml(tankIconSrcLineArt(item.brand, item.size), 20);
     return `<tr>
       <td style="${tdStyle}">${icon}<span style="margin-left:${icon?'4px':'0'};">แก๊ส ${item.size} kg${brandTag}</span></td>
       <td style="${tdStyle}text-align:center;">${item.qty}</td>
@@ -4418,7 +4471,7 @@ function buildItemsTableHtml(record, amount){
     </tr>`;
   }).join('');
   const otherRows = otherItems.map(item=>{
-    const icon = iconImgHtml(productIconSrc(item.productId), 20);
+    const icon = iconImgHtml(productIconSrcLineArt(item.productId), 20);
     return `<tr>
       <td style="${tdStyle}">${icon}<span style="margin-left:${icon?'4px':'0'};">${escapeHtml(item.name)}</span></td>
       <td style="${tdStyle}text-align:center;">${item.qty}</td>
@@ -4497,10 +4550,11 @@ function buildBillHtml(record, kind, senderName, address, qrPayId, qrLineId){
   `;
 }
 
-/* shorter ~100mm x 53mm variant of the receipt above, for when only a Peripage A6 (not the A9) is
+/* shorter, fixed 130mm x 53mm variant of the receipt above, for when only a Peripage A6 (not the A9) is
    on hand — text is enlarged ~1.3x vs buildBillHtml (still nowhere near as huge as the door-hanger
    notice below, which is meant to be legible from a distance), and the QR/scan-to-pay block is
-   dropped entirely so the whole thing fits in a shorter strip of paper */
+   dropped entirely so the whole thing fits in a shorter strip of paper. Width is forced to 130mm
+   (see widthPx in generateAndShareBill) per user request. */
 function buildBillHtmlCompact(record, kind, senderName, address){
   const cust = record.customerId ? state.customers.find(c=>c.id===record.customerId) : null;
   const custName = cust ? cust.name : (kind==='task' ? (record.customName||'ไม่ระบุชื่อ') : (record.note || 'ลูกค้าหน้าร้าน'));
@@ -4593,7 +4647,7 @@ function chooseBillType(){
       <h3>เลือกประเภทเอกสาร</h3>
       <div class="btnrow" style="flex-direction:column;align-items:stretch;gap:8px;">
         <button type="button" class="btn primary" data-bill-type="receipt">🧾 ใบเสร็จรับเงิน (100x80mm)</button>
-        <button type="button" class="btn primary" data-bill-type="receipt_small">🧾 ใบเสร็จเล็ก 100x53mm (ไม่มี QR, สำหรับ Peripage A6)</button>
+        <button type="button" class="btn primary" data-bill-type="receipt_small">🧾 ใบเสร็จเล็ก 130x53mm (ไม่มี QR, สำหรับ Peripage A6)</button>
         <button type="button" class="btn primary" data-bill-type="notice">📌 ใบปิดแจ้งหนี้ (ติดถังแก๊ส)</button>
       </div>
       <div class="btnrow" style="margin-top:12px;">
@@ -4622,7 +4676,9 @@ async function generateAndShareBill(record, kind, triggerBtn){
   if(details===null) return; // user cancelled
   const { senderName, address } = details;
   if(triggerBtn){ triggerBtn.textContent = '⏳ กำลังสร้าง...'; triggerBtn.disabled = true; }
-  const widthPx = isNotice ? 420 : 480; // notice card targets ~105mm-wide Peripage A6 paper; receipts target ~100mm
+  // notice card targets ~105mm-wide Peripage A6 paper; full receipt targets ~100mm; the compact
+  // receipt_small is forced to a fixed 130mm width per user request (480px:100mm ratio → 624px:130mm)
+  const widthPx = isNotice ? 420 : (isCompactReceipt ? 624 : 480);
   const qrPayId = 'qrPay_' + uid();
   const qrLineId = 'qrLine_' + uid();
   const container = document.createElement('div');
@@ -4637,7 +4693,7 @@ async function generateAndShareBill(record, kind, triggerBtn){
   try{
     const amount = kind==='sale' ? Number(record.amount||0) : computeSuggestedPrice(record.gasBreakdown, false) + sumOtherItemsTotal(record.otherItems);
     const qrSize = isNotice ? 240 : 120; // notice card is printed small and taped outdoors — QR needs to stay scannable
-    // the compact 100x53mm receipt has no QR section in its markup at all — skip QR generation entirely
+    // the compact 130x53mm receipt has no QR section in its markup at all — skip QR generation entirely
     if(!isCompactReceipt){
       new QRCode(document.getElementById(qrPayId), { text: buildPromptPayPayload(SHOP_INFO.promptPayTarget, kind==='sale'? amount : 0), width:qrSize, height:qrSize });
       // the notice card only ever has the payment QR — LINE QR only exists in the regular receipt's markup
@@ -5087,14 +5143,17 @@ function openRoutePlotModal(){
       const soi = cust? cust.soi : t.soi;
       const moo = cust? cust.moo : t.moo;
       const landmark = cust? cust.landmark : t.landmark;
-      stops.push({ t, name, dist, bearing, coord, soi, moo, landmark, urgency: getTaskUrgencyState(t), navLink: mapsUrl(address) });
+      // compass color badge always uses the FIXED shop coordinate (state.shopCoord), even when the
+      // route-plot itself is currently referenced off the truck pin for distance/bearing — keeps the
+      // badge color consistent with the same badge shown on the task card
+      const compassInfo = getTaskCompassInfo(t);
+      stops.push({ t, name, dist, bearing, coord, soi, moo, landmark, compassColor: compassInfo? compassInfo.color : '#ccc', compassLabel: compassInfo? compassInfo.label : null, navLink: mapsUrl(address) });
     } else {
       noCoordStops.push({ t, name });
     }
   });
   const maxDist = Math.max(1, ...stops.map(s=>s.dist));
   const R = 128; // plot radius in svg units, center at (150,150)
-  const urgencyColor = { red:'#B23A2E', yellow:'#D8A32C', green:'#3F8F5B', paused:'#7A8BA0' };
   // ROUTE ALGORITHM v2 — single-pass greedy nearest-neighbor over ALL stops (no separate "group
   // first, then order" step), using an EFFECTIVE distance that softly discounts (not hard-merges)
   // stops sharing a ซอย/หมู่/จุดสังเกต with wherever we currently are. Real GPS distance is always
@@ -5192,7 +5251,7 @@ function openRoutePlotModal(){
     const rad = s.bearing * Math.PI/180;
     const x = 150 + r*Math.sin(rad);
     const y = 150 - r*Math.cos(rad);
-    return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="7" fill="${urgencyColor[s.urgency]||'#888'}" stroke="#fff" stroke-width="1.5"><title>${escapeAttr(s.name)} — ${s.dist.toFixed(1)} กม.</title></circle>
+    return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="7" fill="${s.compassColor||'#888'}" stroke="#fff" stroke-width="1.5"><title>${escapeAttr(s.name)} — ${s.dist.toFixed(1)} กม.${s.compassLabel? ' — ทิศ'+s.compassLabel+'จากร้าน' : ''}</title></circle>
       <text x="${x.toFixed(1)}" y="${(y-11).toFixed(1)}" font-size="9" text-anchor="middle" fill="#333">${s.num}</text>`;
   }).join('');
   const ringRadii = [R*0.33, R*0.66, R];
@@ -5212,7 +5271,7 @@ function openRoutePlotModal(){
     <div class="rem-meta" style="font-weight:700;margin:10px 0 4px;">${escapeHtml(g.label)} (${g.stops.length} ราย)</div>
     ${g.stops.map(s=>`
       <div class="card" style="padding:8px 12px;margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;gap:8px;">
-        <div>${getTaskUrgencyIcon(s.urgency)} <b>${s.num}. ${escapeHtml(s.name)}</b> <span class="rem-meta">~${s.dist.toFixed(1)} กม.</span></div>
+        <div><span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${s.compassColor||'#ccc'};vertical-align:middle;" title="${s.compassLabel? 'ทิศ'+s.compassLabel+'จากร้าน' : 'ยังไม่รู้ทิศ'}"></span> ${getTaskOrderIcon(s.t)} <b>${s.num}. ${escapeHtml(s.name)}</b> <span class="rem-meta">~${s.dist.toFixed(1)} กม.</span></div>
         ${s.navLink? `<a class="btn ghost small" href="${s.navLink}" target="_blank" rel="noopener" style="text-decoration:none;flex-shrink:0;">🧭</a>` : ''}
       </div>`).join('')}
   `).join('');
@@ -5433,8 +5492,8 @@ function renderTasks(){
       </div>
     </div>`;
 
-  const filterLabels = {all:'ทั้งหมด', red:'🔴 ค้างนาน', yellow:'🟡 รอนาน', green:'🟢 ปกติ', paused:'🔵 พักไว้'};
-  const sortLabels = {urgency:'ความเร่งรีบ', name:'ชื่อ', recent:'เพิ่มล่าสุด', landmark:'จุดสังเกต/สิ่งที่นึกถึง', distance:'ระยะใกล้-ไกล (จากที่ปักหมุด)'};
+  const filterLabels = {all:'ทั้งหมด', paused:'⏸️ พักไว้'};
+  const sortLabels = {order:'ลำดับที่ตั้งเอง', name:'ชื่อ', recent:'เพิ่มล่าสุด', landmark:'จุดสังเกต/สิ่งที่นึกถึง', distance:'ระยะใกล้-ไกล (จากที่ปักหมุด)'};
   const activeSummary = [];
   if(tasksFilterType!=='all') activeSummary.push(filterLabels[tasksFilterType]);
   activeSummary.push('เรียงตาม'+sortLabels[tasksSort]);
@@ -5449,8 +5508,8 @@ function renderTasks(){
 
   let panel = '';
   if(tasksFilterOpen){
-    const filterChips = [['all','ทั้งหมด'],['red','🔴 ค้างนาน'],['yellow','🟡 รอนาน'],['green','🟢 ปกติ'],['paused','🔵 พักไว้']];
-    const sortOptions = [['urgency','ความเร่งรีบ'],['name','ชื่อ'],['recent','เพิ่มล่าสุด'],['landmark','จุดสังเกต'],['distance','📍 ระยะใกล้-ไกล']];
+    const filterChips = [['all','ทั้งหมด'],['paused','⏸️ พักไว้']];
+    const sortOptions = [['order','ลำดับที่ตั้งเอง'],['name','ชื่อ'],['recent','เพิ่มล่าสุด'],['landmark','จุดสังเกต'],['distance','📍 ระยะใกล้-ไกล']];
     panel = `
       <div class="stamp-card" style="margin-bottom:12px;">
         <div class="rem-meta" style="margin-bottom:6px;font-weight:700;">กรองตามสถานะ</div>
@@ -5478,17 +5537,14 @@ function renderTasks(){
       return haystack.includes(q);
     });
   }
-  if(tasksFilterType!=='all'){ list = list.filter(t=> getTaskUrgencyState(t)===tasksFilterType); }
-  const stateWeight = { red:0, yellow:1, green:2, paused:3 };
+  if(tasksFilterType==='paused'){ list = list.filter(t=> t.manualOrder==='paused'); }
   if(tasksSort==='name') list.sort((a,b)=>{
     const an = (a.customerId? (state.customers.find(c=>c.id===a.customerId)||{}).name : a.customName) || '';
     const bn = (b.customerId? (state.customers.find(c=>c.id===b.customerId)||{}).name : b.customName) || '';
     return an.localeCompare(bn,'th');
   });
-  // addedAt is set once at creation and never touched again — timerStartAt gets reset by "Activate"
-  // (reactivating a paused task), so sorting by that instead made reactivated old tasks jump to the
-  // top and look like they'd just been added, which is the bug being fixed here
-  else if(tasksSort==='recent') list.sort((a,b)=> (b.addedAt||b.timerStartAt||0) - (a.addedAt||a.timerStartAt||0));
+  // addedAt is set once at creation and never touched again, so this always reflects true add order
+  else if(tasksSort==='recent') list.sort((a,b)=> (b.addedAt||0) - (a.addedAt||0));
   // groups tasks by จุดสังเกต/สิ่งที่นึกถึง text (so stops near the same landmark end up next to each
   // other in the list) — blank/unset landmarks sort to the bottom since there's nothing to group by
   else if(tasksSort==='landmark') list.sort((a,b)=>{
@@ -5513,7 +5569,14 @@ function renderTasks(){
     const bDist = bCoord? haversineKm(truckPinCoord, bCoord) : Infinity;
     return aDist - bDist;
   });
-  else list.sort((a,b)=> stateWeight[getTaskUrgencyState(a)] - stateWeight[getTaskUrgencyState(b)]);
+  // default sort ("order") + fallback: numbered stops (1-9) first in that order, unset ones next
+  // (by add time), paused ones always pushed to the very bottom regardless
+  else list.sort((a,b)=>{
+    const w = t=> t.manualOrder==='paused'? 1000 : (typeof t.manualOrder==='number'? t.manualOrder : 100);
+    const aw = w(a), bw = w(b);
+    if(aw!==bw) return aw-bw;
+    return (a.addedAt||0) - (b.addedAt||0);
+  });
 
   if(!state.tasks.length) return intro + notifyBanner + truckBar + '<div class="empty">ยังไม่มีงานส่งของวันนี้<br>แตะปุ่ม + เพื่อเพิ่มรายชื่อที่ต้องไปส่ง</div>';
   if(!list.length) return intro + notifyBanner + summaryBar + truckBar + searchBar + toggleBtn + panel + '<div class="empty">ไม่พบงานที่ตรงกับเงื่อนไข</div>';
@@ -5524,7 +5587,6 @@ function renderTasks(){
     const phone = cust? cust.phone : t.phone;
     const address = cust? cust.address : t.address;
     const navLink = mapsUrl(address);
-    const urgencyState = getTaskUrgencyState(t);
     const truckShortfall = t.gasBreakdown? getTruckStockShortfall(t.gasBreakdown) : [];
     // old-debt badge — quick red flag next to the name so the driver knows before knocking on the
     // door; kept short (money + cylinder count only, no wording) so it doesn't crowd the card
@@ -5555,7 +5617,7 @@ function renderTasks(){
       <div class="checkbox" data-complete-task="${t.id}" style="cursor:pointer;"></div>
       <div style="flex:1;">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
-          <div class="rem-title"><span data-set-urgency="${t.id}" style="cursor:pointer;padding:2px 4px;margin:-2px -4px;border-radius:6px;" title="แตะเพื่อเปลี่ยนสถานะ">${getTaskUrgencyIcon(urgencyState)}</span> ${escapeHtml(displayName)}${truckShortfall.length? ` <span title="ถังในรถไม่พอสำหรับลูกค้านี้">⚠️</span>` : ''}${oldDebtBadge}</div>
+          <div class="rem-title">${compassDotHtml(t)} <span data-task-order="${t.id}" style="cursor:pointer;padding:2px 4px;margin:-2px -4px;border-radius:6px;" title="แตะเพื่อกำหนดลำดับ/พักงาน">${getTaskOrderIcon(t)}</span> ${escapeHtml(displayName)}${truckShortfall.length? ` <span title="ถังในรถไม่พอสำหรับลูกค้านี้">⚠️</span>` : ''}${oldDebtBadge}</div>
           <div style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
             ${cardDistKm!=null? `<span class="tag gas" style="font-size:11px;">📍~${cardDistKm.toFixed(1)}กม.</span>` : ''}
             ${hasPrachanatCredit? `<span title="มีเครดิตบัตรประชารัฐ ฿${fmtMoney(cust.prachanatCredit)}">🪪</span>` : ''}
@@ -5572,7 +5634,7 @@ function renderTasks(){
         <div class="btnrow">
           <button class="btn ghost small" data-edit-task="${t.id}">แก้ไข</button>
           <button class="btn ghost small" data-bill-task="${t.id}">🧾 บิล</button>
-          ${urgencyState==='paused'? `<button class="btn primary small" style="background:var(--green);" data-reactivate-task="${t.id}">▶️ Activate</button>` : ''}
+          ${t.manualOrder==='paused'? `<button class="btn primary small" style="background:var(--green);" data-reactivate-task="${t.id}">▶️ เลิกพัก</button>` : ''}
           <button class="btn danger small" data-del-task="${t.id}">ลบ</button>
           <button class="btn ghost small" data-add-task-reminder="${t.id}">🚨 เพิ่มแจ้งเตือน</button>
           <button class="btn primary small" data-complete-task="${t.id}" style="margin-left:auto;">✅ กดเมื่อส่งเสร็จ</button>
@@ -5604,7 +5666,6 @@ function openTaskForm(editId){
   // phone/houseNo/soi/moo start folded away (only landmark+address stay visible up top) unless this
   // task already has one of those values filled in — then show them open so nothing looks "lost"
   const hasExtraCustDetails = !!(editing && (editing.phone || editing.houseNo || editing.soi || editing.moo));
-  const initialUrgencyMode = (editing && editing.urgencyMode) ? editing.urgencyMode : 'auto';
   const body = `
     <h3>${editing? 'แก้ไขงานส่งของ' : 'เพิ่มงานส่งของ'}</h3>
     <form class="panel" id="taskForm" novalidate>
@@ -5660,21 +5721,6 @@ function openTaskForm(editId){
           </div>
         </div>
       </div>
-      <div class="field">
-        <label>ความเร่งรีบ</label>
-        <button type="button" id="taskUrgencyBtn" class="btn ghost" style="width:100%;">⚙️ ${TASK_URGENCY_FORM_LABELS[initialUrgencyMode]}</button>
-        <input type="hidden" id="f_taskUrgencyMode" value="${initialUrgencyMode}">
-        <div id="taskUrgencyPopover" style="display:none;margin-top:8px;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--paper);">
-          <div class="rem-meta" style="margin-bottom:8px;">เลือกสีเองได้ตามใจ แต่ระบบยังนับเวลาที่รอต่อเนื่องอยู่เสมอ (โชว์ให้ดูใต้ชื่อ) — 🟢 ≤30 นาที · 🟡 30 นาที-2ชม.30นาที · 🔴 2ชม.30นาทีขึ้นไป คือเกณฑ์เริ่มต้นถ้าเลือก "อัตโนมัติ"</div>
-          <div class="btnrow" style="flex-direction:column;align-items:stretch;gap:6px;">
-            <button type="button" class="btn ghost" data-pick-task-urgency="auto">🟢🟡🔴 อัตโนมัติ (ไล่สีตามเวลาที่รอ)</button>
-            <button type="button" class="btn ghost" data-pick-task-urgency="green">🟢 เขียว (กำหนดเอง)</button>
-            <button type="button" class="btn ghost" data-pick-task-urgency="yellow">🟡 เหลือง (กำหนดเอง)</button>
-            <button type="button" class="btn ghost" data-pick-task-urgency="red">🔴 แดง (กำหนดเอง)</button>
-            <button type="button" class="btn ghost" data-pick-task-urgency="paused">🔵 พักไว้ก่อน (รอ activate)</button>
-          </div>
-        </div>
-      </div>
       <div class="field"><label>หมายเหตุ</label><input id="f_taskNote" placeholder="เช่น โทรก่อนไปส่ง" value="${editing? escapeAttr(editing.note||''):''}"></div>
       <div id="taskFormError" class="rem-meta" style="color:var(--red);display:none;">กรุณากรอกชื่อลูกค้าก่อนบันทึก</div>
       <div class="btnrow">
@@ -5702,37 +5748,6 @@ function openTaskForm(editId){
     box.style.display = isOpen? 'none' : '';
     icon.textContent = isOpen? '▼' : '▲';
   });
-
-  // button-only urgency picker — emoji only appear once the popover opens. Kept form-local (no
-  // showModal/closeModal calls, which would wipe out the rest of this very form since the app
-  // only supports one modal at a time).
-  const urgencyBtn = document.getElementById('taskUrgencyBtn');
-  const urgencyHiddenInput = document.getElementById('f_taskUrgencyMode');
-  if(urgencyBtn){
-    urgencyBtn.addEventListener('click', ()=>{
-      let pop = document.getElementById('taskUrgencyPopover');
-      if(pop){ pop.remove(); return; }
-      pop = document.createElement('div');
-      pop.id = 'taskUrgencyPopover';
-      pop.style.cssText = 'margin-top:8px;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--paper);';
-      pop.innerHTML = `
-        <div class="rem-meta" style="margin-bottom:8px;">เลือกสีเองได้ตามใจ แต่ระบบยังนับเวลาที่รอต่อเนื่องอยู่เสมอ (โชว์ให้ดูใต้ชื่อ) — 🟢 ≤30 นาที · 🟡 30 นาที-2ชม.30นาที · 🔴 2ชม.30นาทีขึ้นไป คือเกณฑ์เริ่มต้นถ้าเลือก "อัตโนมัติ"</div>
-        <div class="btnrow" style="flex-direction:column;align-items:stretch;gap:6px;">
-          <button type="button" class="btn ghost" data-pick-task-urgency="auto">🟢🟡🔴 อัตโนมัติ (ไล่สีตามเวลาที่รอ)</button>
-          <button type="button" class="btn ghost" data-pick-task-urgency="green">🟢 เขียว (กำหนดเอง)</button>
-          <button type="button" class="btn ghost" data-pick-task-urgency="yellow">🟡 เหลือง (กำหนดเอง)</button>
-          <button type="button" class="btn ghost" data-pick-task-urgency="red">🔴 แดง (กำหนดเอง)</button>
-          <button type="button" class="btn ghost" data-pick-task-urgency="paused">🔵 พักไว้ก่อน (รอ activate)</button>
-        </div>`;
-      urgencyBtn.insertAdjacentElement('afterend', pop);
-      pop.querySelectorAll('[data-pick-task-urgency]').forEach(b=>b.addEventListener('click', ()=>{
-        const val = b.dataset.pickTaskUrgency;
-        urgencyHiddenInput.value = val;
-        urgencyBtn.textContent = `⚙️ ${TASK_URGENCY_FORM_LABELS[val]}`;
-        pop.remove();
-      }));
-    });
-  }
 
   const nameInput = document.getElementById('f_taskCustName');
   const suggestBox = document.getElementById('taskCustSuggestions');
@@ -5805,13 +5820,12 @@ function openTaskForm(editId){
       soi: customerId? '' : document.getElementById('f_taskSoi').value.trim(),
       moo: customerId? '' : stripToDigits(document.getElementById('f_taskMoo').value),
       landmark: customerId? '' : document.getElementById('f_taskLandmark').value.trim(),
-      urgencyMode: document.getElementById('f_taskUrgencyMode').value,
       gasBreakdown: (window._lineBuilders['taskLine']||[]).slice(),
       otherItems: (window._otherLineBuilders['taskOtherLine']||[]).slice(),
       note: document.getElementById('f_taskNote').value.trim()
     };
     if(editing){ Object.assign(editing, data); }
-    else { state.tasks.push({ id: uid(), createdAt: todayISO(), timerStartAt: Date.now(), addedAt: Date.now(), ...data }); }
+    else { state.tasks.push({ id: uid(), createdAt: todayISO(), addedAt: Date.now(), ...data }); }
     persistTasks();
     closeModal();
     render();
@@ -6588,7 +6602,7 @@ function attachHandlers(){
   if(pinTruckLocationBtn) pinTruckLocationBtn.addEventListener('click', pinTruckLocationAndPlot);
   document.querySelectorAll('[data-show-tasks-breakdown]').forEach(b=>b.addEventListener('click', showTasksBreakdownModal));
   document.querySelectorAll('[data-open-truck-stock]').forEach(b=>b.addEventListener('click', openTruckStockModal));
-  document.querySelectorAll('[data-set-urgency]').forEach(b=>b.addEventListener('click', ()=>openTaskUrgencyPicker(b.dataset.setUrgency)));
+  document.querySelectorAll('[data-task-order]').forEach(b=>b.addEventListener('click', ()=>openTaskOrderPicker(b.dataset.taskOrder)));
   const enableTaskNotifyBtn = document.getElementById('enableTaskNotifyBtn');
   if(enableTaskNotifyBtn) enableTaskNotifyBtn.addEventListener('click', requestTaskNotificationPermission);
   document.querySelectorAll('[data-task-filter]').forEach(b=>b.addEventListener('click', ()=>{ tasksFilterType = b.dataset.taskFilter; render(); }));
@@ -6666,7 +6680,7 @@ function attachHandlers(){
   }));
   document.querySelectorAll('[data-reactivate-task]').forEach(b=>b.addEventListener('click', ()=>{
     const t = state.tasks.find(x=>x.id===b.dataset.reactivateTask);
-    if(t){ t.timerStartAt = Date.now(); t.urgencyMode = 'auto'; persistTasks(); render(); }
+    if(t){ t.manualOrder = null; persistTasks(); render(); }
   }));
   document.querySelectorAll('[data-del-task]').forEach(b=>b.addEventListener('click', ()=>{
     if(confirm('ลบงานนี้โดยไม่บันทึกการส่งใช่หรือไม่?')){
