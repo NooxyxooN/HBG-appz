@@ -546,6 +546,9 @@ let debtorsCustomDate = todayISO();
 let debtorSearchQuery = '';
 let tasksFilterOpen = false;
 let dailyNoteExpanded = true;
+// checked-off (done) reminders fold away into a collapsed "เสร็จแล้ว" section by default, grouped by
+// date same as the active list, so the active list stays short instead of mixing done+not-done together
+let remindersDoneExpanded = false;
 let tasksFilterType = 'all';
 let customerSearchQuery = '';
 
@@ -6149,10 +6152,39 @@ function getUpcomingReminders(limit){
     .slice(0, limit||999);
 }
 
+// groups an already-filtered reminder list into { date, items[] } buckets sorted by due date, so the
+// list reads like a simple day-by-day agenda instead of one long flat mix of every date at once
+function groupRemindersByDate(list){
+  const sorted = [...list].sort((a,b)=>a.dueDate.localeCompare(b.dueDate));
+  const groups = [];
+  sorted.forEach(r=>{
+    const cur = groups.length? groups[groups.length-1] : null;
+    if(cur && cur.date===r.dueDate) cur.items.push(r);
+    else groups.push({ date:r.dueDate, items:[r] });
+  });
+  return groups;
+}
+function renderReminderDateGroupsHtml(groups){
+  return groups.map(g=>`
+    <div class="rem-meta" style="font-weight:700;margin:12px 0 6px;">${fmtDateShort(g.date)}</div>
+    ${g.items.map(renderReminderCard).join('')}
+  `).join('');
+}
+// checked-off ("done") reminders fold away out of the main list into a collapsed section below,
+// grouped by date the same way — per user's request ("แจ้งเตือนอันไหนเช็คแล้วก็ให้พับเก็บไว้ แยกวันไว้ด้วย")
 function renderReminders(){
   if(!state.reminders.length) return '<div class="empty">ยังไม่มีแจ้งเตือน<br>แตะปุ่ม + เพื่อเพิ่มแจ้งเตือนใหม่</div>';
-  const sorted = [...state.reminders].sort((a,b)=>a.dueDate.localeCompare(b.dueDate));
-  return sorted.map(renderReminderCard).join('');
+  const active = state.reminders.filter(r=>!r.done);
+  const done = state.reminders.filter(r=>r.done);
+  const activeHtml = active.length
+    ? renderReminderDateGroupsHtml(groupRemindersByDate(active))
+    : '<div class="empty">ไม่มีแจ้งเตือนที่ยังไม่เสร็จ 🎉</div>';
+  const doneToggle = done.length? `
+    <div class="btnrow" style="margin-top:16px;">
+      <button type="button" class="btn ghost small" id="toggleRemindersDone">${remindersDoneExpanded?'▲ ซ่อน':'▼ ดู'}รายการที่เช็คเสร็จแล้ว (${done.length})</button>
+    </div>` : '';
+  const doneHtml = remindersDoneExpanded ? renderReminderDateGroupsHtml(groupRemindersByDate(done)) : '';
+  return activeHtml + doneToggle + doneHtml;
 }
 
 function renderReminderCard(r){
@@ -6613,6 +6645,8 @@ function attachHandlers(){
   if(openDailySummaryBtn) openDailySummaryBtn.addEventListener('click', openDailySummaryModal);
   const toggleDailyNoteExpand = document.getElementById('toggleDailyNoteExpand');
   if(toggleDailyNoteExpand) toggleDailyNoteExpand.addEventListener('click', ()=>{ dailyNoteExpanded = !dailyNoteExpanded; render(); });
+  const toggleRemindersDone = document.getElementById('toggleRemindersDone');
+  if(toggleRemindersDone) toggleRemindersDone.addEventListener('click', ()=>{ remindersDoneExpanded = !remindersDoneExpanded; render(); });
   // back to the old "just type and walk away" textarea (dad-friendly — no + button to remember to
   // press) but underneath it still adds each save as a NEW itemized entry rather than overwriting the
   // whole day, so the collapse/history/edit/delete features built on top of the array shape still work
