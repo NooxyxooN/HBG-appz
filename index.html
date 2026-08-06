@@ -26,7 +26,7 @@
 </script>
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js";
-  import { getFirestore, doc, getDoc, setDoc, onSnapshot, runTransaction } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
+  import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager, doc, getDoc, setDoc, onSnapshot, runTransaction } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyCGbRb6h1lGf7JpqLoVT-giA0L1xydeC5A",
@@ -42,7 +42,24 @@
   let app, db, fbError = null;
   try{
     app = initializeApp(firebaseConfig);
-    db = getFirestore(app);
+    // Offline persistence: without this, a write made while offline (e.g. typing in a delivery job
+    // with no internet) only lives in memory — if the app/tab gets closed or the phone kills it in
+    // the background before the connection comes back, that write is lost for good and the job
+    // silently "disappears" the next time the app loads (this was exactly the reported bug). With a
+    // persistent (IndexedDB-backed) local cache, queued writes survive the app being closed/reopened
+    // while still offline, and Firestore automatically flushes them to the server the moment the
+    // connection returns — no extra code needed anywhere else in the app for that part to work.
+    // Falls back to the plain in-memory client (works fine online, just without the offline-durability
+    // guarantee) if the device/browser doesn't support persistent storage (e.g. some private-browsing
+    // modes, or a second tab open without multi-tab support).
+    try{
+      db = initializeFirestore(app, {
+        localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+      });
+    }catch(persistErr){
+      console.warn('Firestore persistent offline cache unavailable, falling back to default (online-only-durable) cache', persistErr);
+      db = getFirestore(app);
+    }
   }catch(e){
     fbError = e;
     console.error('Firebase init failed', e);
@@ -269,6 +286,13 @@
     <button id="shareQrBtn" style="background:var(--orange);color:#fff;border-radius:6px;padding:5px 10px;font-size:12px;font-weight:600;">🔗 แชร์</button>
   </div>
 </header>
+
+<!-- shown whenever the device has no internet connection — reassures whoever's using the app that
+     anything they type/save right now isn't lost, just queued locally until the connection is back
+     (see the persistentLocalCache setup below), since that used to look like data silently vanishing -->
+<div id="offlineBanner" style="display:none;background:var(--orange-dark);color:#fff;text-align:center;font-size:12.5px;font-weight:600;padding:6px 10px;position:sticky;top:0;z-index:19;">
+  📴 ออฟไลน์ตอนนี้ — พิมพ์/บันทึกได้ตามปกติ ข้อมูลจะถูกส่งเข้าระบบอัตโนมัติทันทีที่เน็ตกลับมา
+</div>
 
 <main id="app"></main>
 
@@ -686,7 +710,33 @@ function isCustomerBlacklisted(customerId){
   return !!info && info.days >= DEBTOR_BLACKLIST_INACTIVE_DAYS;
 }
 
+// shows/hides the #offlineBanner based on the browser's connectivity state — purely a reassurance
+// indicator, doesn't affect the actual save/sync mechanism (that's handled by Firestore's
+// persistentLocalCache set up above), just makes it visible when data is being queued locally
+function updateOfflineBanner(){
+  const el = document.getElementById('offlineBanner');
+  if(el) el.style.display = navigator.onLine ? 'none' : 'block';
+}
+// also fires a phone notification on the moment connectivity drops/returns, so whoever's using the
+// app notices even if they're not staring at the screen right when it happens — reuses the same
+// Notification permission already granted for "งานส่งใหม่" alerts, no separate opt-in needed.
+// (Only fires while this tab/PWA is actually open and running — like the other local notifications
+// in this app, it can't wake up a fully-closed app, since that would require real push infrastructure.)
+window.addEventListener('online', ()=>{
+  updateOfflineBanner();
+  if('Notification' in window && Notification.permission === 'granted'){
+    showLocalNotification('✅ เน็ตกลับมาแล้ว', 'ข้อมูลที่ค้างไว้ตอนออฟไลน์กำลังถูกส่งเข้าระบบอัตโนมัติ');
+  }
+});
+window.addEventListener('offline', ()=>{
+  updateOfflineBanner();
+  if('Notification' in window && Notification.permission === 'granted'){
+    showLocalNotification('📴 ไม่มีอินเทอร์เน็ต', 'พิมพ์/บันทึกได้ตามปกติ ข้อมูลจะถูกส่งเข้าระบบอัตโนมัติทันทีที่เน็ตกลับมา');
+  }
+});
+
 async function init(){
+  updateOfflineBanner();
   // all 15 collections used to load ONE AT A TIME (await in sequence) — each is its own Firestore
   // round-trip, so total wait was the SUM of all 15 request times. That's exactly what made the app
   // feel slower and slower to open as more data piled up over time. Firing them all at once with
@@ -2928,8 +2978,8 @@ function renderCustomers(){
   const toolRow = `<div class="btnrow" style="margin-bottom:10px;"><button class="btn ghost small" id="openImportBtn">📋 นำเข้าหลายรายการ</button><button class="btn ghost small" id="exportCsvBtn">📤 ส่งออก CSV</button><button class="btn ${dupeGroupCount? 'primary':'ghost'} small" id="openDupeCheckBtn">🔀 ตรวจสอบชื่อซ้ำ${dupeGroupCount? ` (${dupeGroupCount})` : ''}</button><button class="btn ghost small" id="openManualMergeBtn">🔀 รวมลูกค้าเอง</button></div>`;
 
   const activeSummary = [];
-  if(customersFilterType!=='all') activeSummary.push({debt:'มีหนี้',gas:'มีถังค้าง',nophone:'ไม่มีเบอร์โทร',tierCrown:'👑 มงกุฎ',tierRegular:'👤 ทั่วไป',tierOccasional:'🚶 ขาจร',tierGhost:'👻 ล่องหน',tierNew:'🆕 ลูกค้าใหม่'}[customersFilterType]);
-  const sortLabels = {name:'ชื่อ',debt:'ยอดหนี้',gas:'ถังค้าง',recent:'เพิ่มล่าสุด'};
+  if(customersFilterType!=='all') activeSummary.push({debt:'มีหนี้',gas:'มีถังค้าง',nophone:'ไม่มีเบอร์โทร',nomap:'ไม่มีแผนที่',tierCrown:'👑 มงกุฎ',tierRegular:'👤 ทั่วไป',tierOccasional:'🚶 ขาจร',tierGhost:'👻 ล่องหน',tierNew:'🆕 ลูกค้าใหม่'}[customersFilterType]);
+  const sortLabels = {name:'ชื่อ',debt:'ยอดหนี้',gas:'ถังค้าง',recent:'เพิ่มล่าสุด',distance:'ระยะใกล้-ไกล (จากที่ปักหมุด)'};
   activeSummary.push('เรียงตาม'+sortLabels[customersSort]);
   const searchBar = `<div class="field" style="margin-bottom:10px;"><input id="custSearchInput" placeholder="🔍 ค้นหาชื่อหรือเบอร์โทรลูกค้า..." value="${escapeAttr(customerSearchQuery)}"></div>`;
   const toggleBtn = `<div class="btnrow" style="margin-bottom:${customersFilterOpen?'10px':'12px'};">
@@ -2939,9 +2989,9 @@ function renderCustomers(){
 
   let panel = '';
   if(customersFilterOpen){
-    const filterChips = [['all','ทั้งหมด'],['debt','มีหนี้'],['gas','มีถังค้าง'],['nophone','ไม่มีเบอร์โทร']];
+    const filterChips = [['all','ทั้งหมด'],['debt','มีหนี้'],['gas','มีถังค้าง'],['nophone','ไม่มีเบอร์โทร'],['nomap','ไม่มีแผนที่']];
     const tierChips = [['tierCrown','👑 มงกุฎ'],['tierRegular','👤 ทั่วไป'],['tierOccasional','🚶 ขาจร'],['tierGhost','👻 ล่องหน'],['tierNew','🆕 ลูกค้าใหม่']];
-    const sortOptions = [['name','ชื่อ'],['debt','ยอดหนี้'],['gas','ถังค้าง'],['recent','เพิ่มล่าสุด']];
+    const sortOptions = [['name','ชื่อ'],['debt','ยอดหนี้'],['gas','ถังค้าง'],['recent','เพิ่มล่าสุด'],['distance','📍 ระยะใกล้-ไกล']];
     panel = `
       <div class="stamp-card" style="margin-bottom:12px;">
         <div class="rem-meta" style="margin-bottom:6px;font-weight:700;">กรอง</div>
@@ -2950,6 +3000,7 @@ function renderCustomers(){
         <div class="btnrow" style="margin-bottom:10px;">${tierChips.map(([k,l])=>`<button class="btn ${customersFilterType===k?'primary':'ghost'} small" data-cust-filter="${k}">${l}</button>`).join('')}</div>
         <div class="rem-meta" style="margin-bottom:6px;font-weight:700;">เรียงตาม</div>
         <div class="btnrow">${sortOptions.map(([k,l])=>`<button class="btn ${customersSort===k?'primary':'ghost'} small" data-cust-sort="${k}">${l}</button>`).join('')}</div>
+        ${customersSort==='distance'? `<div class="rem-meta" style="margin-top:6px;">📍 ปักไว้เมื่อ ${truckPinCoord? new Date(truckPinCoord.at).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}) : '-'} <button type="button" class="btn ghost small" id="refreshCustPinBtn" style="margin-left:6px;">🔄 ปักหมุดใหม่</button></div>` : ''}
       </div>`;
   }
 
@@ -2961,6 +3012,7 @@ function renderCustomers(){
   if(customersFilterType==='debt') list = list.filter(c=>Number(c.debt||0)>0);
   else if(customersFilterType==='gas') list = list.filter(c=>Number(c.gasCylinders||0)>0);
   else if(customersFilterType==='nophone') list = list.filter(c=>!c.phone);
+  else if(customersFilterType==='nomap') list = list.filter(c=>!c.address);
   else if(customersFilterType==='tierCrown') list = list.filter(c=>getCustomerTier(c.id)==='crown');
   else if(customersFilterType==='tierRegular') list = list.filter(c=>getCustomerTier(c.id)==='regular');
   else if(customersFilterType==='tierOccasional') list = list.filter(c=>getCustomerTier(c.id)==='occasional');
@@ -2969,8 +3021,25 @@ function renderCustomers(){
   if(customersSort==='debt') list.sort((a,b)=>Number(b.debt||0)-Number(a.debt||0));
   else if(customersSort==='gas') list.sort((a,b)=>Number(b.gasCylinders||0)-Number(a.gasCylinders||0));
   else if(customersSort==='recent') list.sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));
+  // sort by straight-line distance from wherever the truck/location was pinned (see
+  // selectDistanceCustomersSort) — same pattern as the Tasks tab's distance sort. Customers with no
+  // readable coordinate (plain-text address, not a Google Maps link) sort to the bottom.
+  else if(customersSort==='distance' && truckPinCoord) list.sort((a,b)=>{
+    const aCoord = coordFromAddress(a.address);
+    const bCoord = coordFromAddress(b.address);
+    const aDist = aCoord? haversineKm(truckPinCoord, aCoord) : Infinity;
+    const bDist = bCoord? haversineKm(truckPinCoord, bCoord) : Infinity;
+    return aDist - bDist;
+  });
   else list.sort((a,b)=>a.name.localeCompare(b.name,'th'));
-  const listHtml = list.length? list.map(renderCustomerCard).join('') : '<div class="empty">ไม่พบลูกค้าที่ตรงกับเงื่อนไข</div>';
+  const listHtml = list.length? list.map(c=>{
+    let distanceKm = null;
+    if(customersSort==='distance' && truckPinCoord){
+      const coord = coordFromAddress(c.address);
+      if(coord) distanceKm = haversineKm(truckPinCoord, coord);
+    }
+    return renderCustomerCard(c, { distanceKm });
+  }).join('') : '<div class="empty">ไม่พบลูกค้าที่ตรงกับเงื่อนไข</div>';
   return toolRow + searchBar + toggleBtn + panel + `<div class="rem-meta" style="margin-bottom:8px;">พบ ${list.length} คน</div>` + listHtml;
 }
 
@@ -3059,7 +3128,7 @@ function renderCustomerCard(c, opts){
       <span>${c.phone? '📞 '+escapeHtml(c.phone) : ''}</span>
       ${link? `<a class="maps-link" href="${link}" target="_blank" rel="noopener">🧭 นำทาง</a>` : ''}
     </div>
-    <div class="rem-meta" style="margin-top:2px;">${(()=>{ const lo = getCustomerLastOrder(c.id); return lo? `สั่งล่าสุด ${fmtDateShort(lo.lastDate)} (${lo.daysSinceLast===0? 'วันนี้' : lo.daysSinceLast+' วันก่อน'})` : 'ยังไม่เคยสั่ง'; })()}</div>
+    <div class="rem-meta" style="margin-top:2px;">${(()=>{ const lo = getCustomerLastOrder(c.id); return lo? `สั่งล่าสุด ${fmtDateShort(lo.lastDate)} (${lo.daysSinceLast===0? 'วันนี้' : lo.daysSinceLast+' วันก่อน'})` : 'ยังไม่เคยสั่ง'; })()}${opts.distanceKm!=null? ` · 📍 ~${opts.distanceKm.toFixed(1)} กม.` : ''}</div>
     <div class="btnrow">
       ${Number(c.gasCylinders||0)>0? `<span class="tag gas">${gasBrandIconsHtml(c.gasCylindersBreakdown, 16) || '🛢️'} ยืมถัง ${c.gasCylinders} ใบ</span>`:''}
       ${Number(c.debt||0)>0? `<span class="tag debt">ค้างชำระ ฿${fmtMoney(c.debt)}</span>` : `<span class="tag paid">ไม่มีหนี้</span>`}
@@ -5125,6 +5194,27 @@ function selectDistanceTasksSort(){
   if(truckPinCoord){ tasksSort = 'distance'; render(); return; }
   pinTruckLocationForSort();
 }
+// same pin-then-sort pattern as the Tasks tab, but for the Customers tab list — shares the same
+// truckPinCoord global, so pinning once on either tab lets both use it without re-pinning
+function pinTruckLocationForCustomersSort(){
+  if(!navigator.geolocation){
+    alert('เบราว์เซอร์/อุปกรณ์นี้ไม่รองรับการหาตำแหน่งปัจจุบัน (GPS)');
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(
+    pos=>{
+      truckPinCoord = { lat: pos.coords.latitude, lng: pos.coords.longitude, at: Date.now() };
+      customersSort = 'distance';
+      render();
+    },
+    ()=>{ alert('หาตำแหน่งตอนนี้ไม่ได้ — ลองเปิดสิทธิ์ตำแหน่งที่ตั้ง (Location) ให้เบราว์เซอร์ก่อน แล้วลองใหม่'); },
+    { enableHighAccuracy:true, timeout:10000, maximumAge:0 }
+  );
+}
+function selectDistanceCustomersSort(){
+  if(truckPinCoord){ customersSort = 'distance'; render(); return; }
+  pinTruckLocationForCustomersSort();
+}
 function openRoutePlotModal(){
   const useTruckPin = routePlotUseTruckPin && !!truckPinCoord;
   const ref = useTruckPin ? truckPinCoord : state.shopCoord;
@@ -6574,7 +6664,12 @@ function attachHandlers(){
   const toggleCustomersFilter = document.getElementById('toggleCustomersFilter');
   if(toggleCustomersFilter) toggleCustomersFilter.addEventListener('click', ()=>{ customersFilterOpen = !customersFilterOpen; render(); });
   document.querySelectorAll('[data-cust-filter]').forEach(b=>b.addEventListener('click', ()=>{ customersFilterType = b.dataset.custFilter; render(); }));
-  document.querySelectorAll('[data-cust-sort]').forEach(b=>b.addEventListener('click', ()=>{ customersSort = b.dataset.custSort; render(); }));
+  document.querySelectorAll('[data-cust-sort]').forEach(b=>b.addEventListener('click', ()=>{
+    if(b.dataset.custSort === 'distance'){ selectDistanceCustomersSort(); return; }
+    customersSort = b.dataset.custSort; render();
+  }));
+  const refreshCustPinBtn = document.getElementById('refreshCustPinBtn');
+  if(refreshCustPinBtn) refreshCustPinBtn.addEventListener('click', pinTruckLocationForCustomersSort);
   const toggleDebtorsFilter = document.getElementById('toggleDebtorsFilter');
   if(toggleDebtorsFilter) toggleDebtorsFilter.addEventListener('click', ()=>{ debtorsFilterOpen = !debtorsFilterOpen; render(); });
   const exportDebtorsBtn = document.getElementById('exportDebtorsBtn');
