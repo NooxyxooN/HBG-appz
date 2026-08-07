@@ -5707,7 +5707,6 @@ function renderTasks(){
     const addedAtStr = t.addedAt? fmtDateTimeShort(t.addedAt) : (t.createdAt? fmtDateShort(t.createdAt) : '');
     return `
     <div class="card rem-card">
-      <div class="checkbox" data-complete-task="${t.id}" style="cursor:pointer;"></div>
       <div style="flex:1;">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
           <div class="rem-title">${compassDotHtml(t)} <span data-task-order="${t.id}" style="cursor:pointer;padding:2px 4px;margin:-2px -4px;border-radius:6px;" title="แตะเพื่อกำหนดลำดับ/พักงาน">${getTaskOrderIcon(t)}</span> ${escapeHtml(displayName)}${truckShortfall.length? ` <span title="ถังในรถไม่พอสำหรับลูกค้านี้">⚠️</span>` : ''}${oldDebtBadge}</div>
