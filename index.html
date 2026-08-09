@@ -376,6 +376,18 @@ async function saveData(key, value){
 function cloneCustomerForEdit(fresh){
   return { ...fresh, gasCylindersBreakdown: Array.isArray(fresh.gasCylindersBreakdown) ? fresh.gasCylindersBreakdown.map(x=>({...x})) : [] };
 }
+// once a credit balance is brought all the way down to zero, its tap-log history is cleared too —
+// otherwise the little "(กด N ครั้ง รวม ฿X)" summary tag keeps counting every tap ever made, forever,
+// even long after all of it has actually been spent/redeemed, which reads as "the old credit is back"
+// even though the CURRENT balance is correct (e.g. balance shows ฿334 from one fresh tap, but the tag
+// still says "กด 6 ครั้ง รวม ฿2,004" from taps that were fully used up months ago). Clearing the log at
+// the zero point gives every future tap a fresh count starting from 1, matching what's actually still
+// outstanding right now. Call this after any change that might reduce a credit balance.
+function resetCreditLogIfDepleted(customer, creditKey, logKey){
+  if(Number(customer[creditKey]||0) <= 0 && (customer[logKey]||[]).length){
+    customer[logKey] = [];
+  }
+}
 // applies a debt/gas-cylinder change to ONE customer against the latest server data via a Firestore
 // transaction (see window.fbAdjustItem) instead of read-modify-write on the whole locally-cached
 // customers array — this is what actually prevents two devices completing deliveries around the
@@ -3124,9 +3136,10 @@ function renderCustomerCard(c, opts){
   const isHistoryExpanded = expandedHistoryIds.has(c.id);
   const stats = isHistoryExpanded ? getCustomerStats(c.id) : null;
   const hasEverUsedPrachanat = Number(c.prachanatCredit||0)>0 || (c.prachanatCreditLog||[]).length>0;
+  const hasEverUsedThaiChuay = Number(c.thaiChuayCredit||0)>0 || (c.thaiChuayCreditLog||[]).length>0;
   return `
   <div class="card">
-    <div class="cust-name">${customerTierIconHtml(c.id)} ${escapeHtml(c.name)}${hasEverUsedPrachanat? ` <span data-open-prachanat-history="${c.id}" style="cursor:pointer;font-size:15px;" title="เคยใช้บัตรประชารัฐ — แตะดูประวัติ">🪪</span>` : ''}</div>
+    <div class="cust-name">${customerTierIconHtml(c.id)} ${escapeHtml(c.name)}${hasEverUsedThaiChuay? ` <span data-open-thaichuay-history="${c.id}" style="cursor:pointer;font-size:15px;" title="เคยใช้ไทยช่วยไทย — แตะดูประวัติ">🎫</span>` : ''}${hasEverUsedPrachanat? ` <span data-open-prachanat-history="${c.id}" style="cursor:pointer;font-size:15px;" title="เคยใช้บัตรประชารัฐ — แตะดูประวัติ">🪪</span>` : ''}</div>
     <div class="cust-row">
       <span>${c.phone? '📞 '+escapeHtml(c.phone) : ''}</span>
       ${link? `<a class="maps-link" href="${link}" target="_blank" rel="noopener">🧭 นำทาง</a>` : ''}
@@ -3135,9 +3148,11 @@ function renderCustomerCard(c, opts){
     <div class="btnrow">
       ${Number(c.gasCylinders||0)>0? `<span class="tag gas">${gasBrandIconsHtml(c.gasCylindersBreakdown, 16) || '🛢️'} ยืมถัง ${c.gasCylinders} ใบ</span>`:''}
       ${Number(c.debt||0)>0? `<span class="tag debt">ค้างชำระ ฿${fmtMoney(c.debt)}</span>` : `<span class="tag paid">ไม่มีหนี้</span>`}
-      ${Number(c.thaiChuayCredit||0)>0? `<span class="tag paid">🎫 เครดิตไทยช่วยไทย ฿${fmtMoney(c.thaiChuayCredit)}${(c.thaiChuayCreditLog||[]).length? ` (กด ${c.thaiChuayCreditLog.reduce((a,l)=>a+Number(l.times||1),0)} ครั้ง รวม ฿${fmtMoney(c.thaiChuayCreditLog.reduce((a,l)=>a+Number(l.amount||0),0))})` : ''}</span>` : ''}
-      ${Number(c.prachanatCredit||0)>0? `<span class="tag paid">🪪 เครดิตประชารัฐ ฿${fmtMoney(c.prachanatCredit)}${(c.prachanatCreditLog||[]).length? ` (กด ${c.prachanatCreditLog.reduce((a,l)=>a+Number(l.times||1),0)} ครั้ง รวม ฿${fmtMoney(c.prachanatCreditLog.reduce((a,l)=>a+Number(l.amount||0),0))})` : ''}</span>` : ''}
+      ${Number(c.thaiChuayCredit||0)>0? `<span class="tag paid">🎫 เครดิตไทยช่วยไทย ฿${fmtMoney(c.thaiChuayCredit)}</span>` : ''}
+      ${Number(c.prachanatCredit||0)>0? `<span class="tag paid">🪪 เครดิตประชารัฐ ฿${fmtMoney(c.prachanatCredit)}</span>` : ''}
     </div>
+    ${Number(c.thaiChuayCredit||0)>0 && (c.thaiChuayCreditLog||[]).length? `<div class="rem-meta" style="margin-top:2px;">🎫 ประวัติกดสะสม: ${c.thaiChuayCreditLog.reduce((a,l)=>a+Number(l.times||1),0)} ครั้ง รวม ฿${fmtMoney(c.thaiChuayCreditLog.reduce((a,l)=>a+Number(l.amount||0),0))}</div>` : ''}
+    ${Number(c.prachanatCredit||0)>0 && (c.prachanatCreditLog||[]).length? `<div class="rem-meta" style="margin-top:2px;">🪪 ประวัติกดสะสม: ${c.prachanatCreditLog.reduce((a,l)=>a+Number(l.times||1),0)} ครั้ง รวม ฿${fmtMoney(c.prachanatCreditLog.reduce((a,l)=>a+Number(l.amount||0),0))}</div>` : ''}
     ${c.notes? `<div class="rem-meta" style="margin-top:8px;">📝 ${escapeHtml(c.notes)}</div>`:''}
     <div class="btnrow">
       <button class="btn primary small" data-pay-cust="${c.id}">💰 ชำระเงิน</button>
@@ -3145,10 +3160,8 @@ function renderCustomerCard(c, opts){
       <button class="btn ghost small" data-add-debt="${c.id}">➕ เพิ่มหนี้</button>
       <button class="btn ghost small" data-add-credit="${c.id}">🎫 เครดิตไทยช่วยไทย</button>
       <button class="btn ghost small" data-add-prachanat-credit="${c.id}">🪪 เครดิตประชารัฐ</button>
-      ${Number(c.debt||0)>0 && Number(c.thaiChuayCredit||0)>0? `<button class="btn ghost small" style="background:var(--green-bg);" data-reconcile-credit="${c.id}">⚖️ หักหนี้ด้วยเครดิต</button>` : ''}
       <button class="btn ghost small" data-reorder-cust="${c.id}">➕ สั่งอีกรอบ</button>
       ${opts.showInvoiceBtn && (Number(c.debt||0)>0 || Number(c.gasCylinders||0)>0)? `<button class="btn ghost small" data-bill-debtor="${c.id}">🧾 ใบแจ้งหนี้/บิล</button>` : ''}
-      ${opts.showClearAll? `<button class="btn primary small" style="background:var(--green);" data-clear-all-cust="${c.id}">✅ เคลียร์ครบ</button>` : ''}
     </div>
     <div class="btnrow">
       <button class="btn ghost small" data-edit-cust="${c.id}">แก้ไข</button>
@@ -3298,17 +3311,20 @@ function openCustomerForm(id){
 function openPaymentPrompt(id){
   const c = state.customers.find(x=>x.id===id);
   if(!c) return;
+  const debt = Number(c.debt||0);
+  const thaiChuayCredit = Number(c.thaiChuayCredit||0);
+  const prachanatCredit = Number(c.prachanatCredit||0);
   const body = `
     <h3>รับชำระเงิน — ${escapeHtml(c.name)}</h3>
     <form class="panel" id="payForm" novalidate>
       <div class="field"><label>ยอดค้างชำระปัจจุบัน</label>
-        <div class="mono" style="font-size:18px;color:var(--red);">฿${fmtMoney(c.debt||0)}</div>
+        <div class="mono" style="font-size:18px;color:var(--red);">฿${fmtMoney(debt)}</div>
       </div>
       <div class="field">
-        <label>จำนวนเงินที่รับชำระ (บาท) *</label>
+        <label>จำนวนเงินสดที่รับชำระ (บาท)</label>
         <input type="text" inputmode="decimal" min="0" step="0.01" id="f_amount">
-        <div id="amountError" class="rem-meta" style="color:var(--red);display:none;margin-top:4px;">กรุณากรอกจำนวนเงินมากกว่า 0</div>
-        <button type="button" class="btn ghost small" id="fullAmountBtn" style="margin-top:6px;">💯 จ่ายเต็มจำนวน (฿${fmtMoney(c.debt||0)})</button>
+        <div id="amountError" class="rem-meta" style="color:var(--red);display:none;margin-top:4px;">กรุณากรอกจำนวนเงินหรือเลือกใช้เครดิตอย่างน้อยหนึ่งอย่าง</div>
+        <button type="button" class="btn ghost small" id="fullAmountBtn" style="margin-top:6px;">💯 จ่ายเต็มจำนวน (฿${fmtMoney(debt)})</button>
       </div>
       <div class="field">
         <label style="display:flex;align-items:center;gap:8px;font-weight:400;"><input type="checkbox" id="f_usePrachanat" style="width:auto;"> 🪪 จ่ายด้วยบัตรประชารัฐ (กดตอนนี้เลย ไม่ได้กดล่วงหน้า)</label>
@@ -3319,6 +3335,23 @@ function openPaymentPrompt(id){
           <button type="button" class="btn ghost small" id="usePrachanatTotalBtn" style="margin-top:6px;">ใช้ยอดนี้</button>
         </div>
       </div>
+      ${(thaiChuayCredit>0 || prachanatCredit>0)? `<div class="rem-meta" style="font-weight:700;margin:4px 0 2px;">หรือหักหนี้ด้วยเครดิตที่กดไว้ล่วงหน้าแล้ว</div>` : ''}
+      ${thaiChuayCredit>0? `
+      <div class="field">
+        <label style="display:flex;align-items:center;gap:8px;font-weight:400;"><input type="checkbox" id="f_useThaiChuayCredit" style="width:auto;"> 🎫 ใช้เครดิตไทยช่วยไทยที่มี (฿${fmtMoney(thaiChuayCredit)}) หักหนี้</label>
+        <div id="thaiChuayCreditBox" style="display:none;margin-top:8px;">
+          <label>จำนวนที่จะใช้ (บาท)</label>
+          <input type="text" inputmode="decimal" min="0" id="f_thaiChuayCreditApplied" value="${Math.min(thaiChuayCredit, debt)}">
+        </div>
+      </div>` : ''}
+      ${prachanatCredit>0? `
+      <div class="field">
+        <label style="display:flex;align-items:center;gap:8px;font-weight:400;"><input type="checkbox" id="f_usePrachanatCredit" style="width:auto;"> 🪪 ใช้เครดิตประชารัฐที่มี (฿${fmtMoney(prachanatCredit)}) หักหนี้</label>
+        <div id="prachanatCreditBox" style="display:none;margin-top:8px;">
+          <label>จำนวนที่จะใช้ (บาท)</label>
+          <input type="text" inputmode="decimal" min="0" id="f_prachanatCreditApplied" value="${Math.min(prachanatCredit, debt)}">
+        </div>
+      </div>` : ''}
       <div class="btnrow">
         <button type="submit" class="btn primary">บันทึกการชำระเงิน</button>
         <button type="button" class="btn ghost" id="cancelModal">ยกเลิก</button>
@@ -3327,7 +3360,7 @@ function openPaymentPrompt(id){
   `;
   showModal(body);
   document.getElementById('fullAmountBtn').addEventListener('click', ()=>{
-    document.getElementById('f_amount').value = Number(c.debt||0);
+    document.getElementById('f_amount').value = debt;
   });
   const prachanatCheckbox = document.getElementById('f_usePrachanat');
   const prachanatBox = document.getElementById('prachanatPayBox');
@@ -3346,10 +3379,32 @@ function openPaymentPrompt(id){
     const cards = Math.max(1, Number(prachanatCardsInput.value)||1);
     document.getElementById('f_amount').value = cards*80;
   });
+  // toggle the two "use existing banked credit to pay off debt" boxes — this is a pure internal
+  // ledger transfer (see submit handler below), separate from the "จ่ายด้วยบัตรประชารัฐ (กดตอนนี้เลย)"
+  // checkbox above which represents money actually received right now
+  const thaiChuayCreditCheckbox = document.getElementById('f_useThaiChuayCredit');
+  const thaiChuayCreditBox = document.getElementById('thaiChuayCreditBox');
+  if(thaiChuayCreditCheckbox) thaiChuayCreditCheckbox.addEventListener('change', ()=>{
+    thaiChuayCreditBox.style.display = thaiChuayCreditCheckbox.checked? 'block' : 'none';
+  });
+  const prachanatCreditCheckbox = document.getElementById('f_usePrachanatCredit');
+  const prachanatCreditBox = document.getElementById('prachanatCreditBox');
+  if(prachanatCreditCheckbox) prachanatCreditCheckbox.addEventListener('change', ()=>{
+    prachanatCreditBox.style.display = prachanatCreditCheckbox.checked? 'block' : 'none';
+  });
   document.getElementById('payForm').addEventListener('submit', e=>{
     e.preventDefault();
     const amt = Number(document.getElementById('f_amount').value)||0;
-    if(amt<=0){
+    const useThaiChuayCredit = thaiChuayCreditCheckbox? thaiChuayCreditCheckbox.checked : false;
+    const thaiChuayCreditApplied = useThaiChuayCredit
+      ? Math.max(0, Math.min(Number(document.getElementById('f_thaiChuayCreditApplied').value)||0, thaiChuayCredit, debt))
+      : 0;
+    const usePrachanatCredit = prachanatCreditCheckbox? prachanatCreditCheckbox.checked : false;
+    const prachanatCreditApplied = usePrachanatCredit
+      ? Math.max(0, Math.min(Number(document.getElementById('f_prachanatCreditApplied').value)||0, prachanatCredit, Math.max(0, debt - thaiChuayCreditApplied)))
+      : 0;
+    const totalApplied = amt + thaiChuayCreditApplied + prachanatCreditApplied;
+    if(totalApplied<=0){
       document.getElementById('amountError').style.display = 'block';
       document.getElementById('f_amount').focus();
       return;
@@ -3358,23 +3413,34 @@ function openPaymentPrompt(id){
     const prachanatCards = usePrachanat? Math.max(1, Number(prachanatCardsInput.value)||1) : 0;
     adjustCustomerRemote(c.id, fresh=>{
       const updated = cloneCustomerForEdit(fresh);
-      updated.debt = Math.max(0, Number(updated.debt||0) - amt);
+      updated.debt = Math.max(0, Number(updated.debt||0) - amt - thaiChuayCreditApplied - prachanatCreditApplied);
       // paid via ประชารัฐ card RIGHT NOW (not pre-tapped credit) — just append to the tap-count
       // history for audit purposes; the money itself is booked as a normal debt payment below, so
       // this does NOT touch the spendable prachanatCredit balance (nothing was banked in advance)
       if(usePrachanat){
         updated.prachanatCreditLog = [...(updated.prachanatCreditLog||[]), { id: uid(), date: todayISO(), amount: prachanatCards*80, times: prachanatCards, note: 'จ่ายหนี้ด้วยบัตรประชารัฐ' }];
       }
-      // any partial (or full) money repayment resets the "บัญชีดำ" clock — see isCustomerBlacklisted
-      updated.debtPaymentLog = [...(updated.debtPaymentLog||[]), { id: uid(), date: todayISO(), type:'money', amount: amt }];
+      // applying an EXISTING banked credit balance is a pure internal transfer — that money was
+      // already recognized as income back when the credit was originally topped up, so this only
+      // moves it from the credit balance onto the debt, it does NOT create a new income record
+      if(thaiChuayCreditApplied>0) updated.thaiChuayCredit = Math.max(0, Number(updated.thaiChuayCredit||0) - thaiChuayCreditApplied);
+      if(prachanatCreditApplied>0) updated.prachanatCredit = Math.max(0, Number(updated.prachanatCredit||0) - prachanatCreditApplied);
+      resetCreditLogIfDepleted(updated, 'thaiChuayCredit', 'thaiChuayCreditLog');
+      resetCreditLogIfDepleted(updated, 'prachanatCredit', 'prachanatCreditLog');
+      // any partial (or full) repayment — cash or credit — resets the "บัญชีดำ" clock, see isCustomerBlacklisted
+      updated.debtPaymentLog = [...(updated.debtPaymentLog||[]), { id: uid(), date: todayISO(), type:'money', amount: totalApplied }];
       return updated;
     }).then(()=>render());
-    state.sales.push({
-      id:uid(), date:todayISO(), amount:amt, customerId:c.id,
-      note: usePrachanat? `รับชำระหนี้ (บัตรประชารัฐ x${prachanatCards})` : 'รับชำระหนี้',
-      createdAt: Date.now()
-    });
-    persistSales();
+    // only the CASH portion (amt) is newly recognized income — credit portions were already booked
+    // as income when the credit was first topped up, so recording them again here would double-count
+    if(amt>0){
+      state.sales.push({
+        id:uid(), date:todayISO(), amount:amt, customerId:c.id,
+        note: usePrachanat? `รับชำระหนี้ (บัตรประชารัฐ x${prachanatCards})` : 'รับชำระหนี้',
+        createdAt: Date.now()
+      });
+      persistSales();
+    }
     closeModal();
     render();
   });
@@ -3563,46 +3629,83 @@ function openAddThaiChuayCreditPrompt(id){
   });
 }
 
-// manual "settle debt against credit" reconciliation — used when a customer already has an old
-// unpaid debt AND separately has a banked ไทยช่วยไทย credit balance (e.g. they tapped it hoping
-// it'd cover an old bill rather than a brand-new order). Doesn't touch state.sales/income at all:
-// the credit's value was already recognized as income the moment it was topped up, so this is
-// purely an internal transfer between the two customer-record balances.
-function openReconcileThaiChuayPrompt(id){
-  const c = state.customers.find(x=>x.id===id);
+// per-tap history for ไทยช่วยไทย credit — exact parity with openPrachanatHistoryModal below, so
+// both credit types get the same "แตะดูประวัติ" treatment (each tap shown as its own card with
+// amount + date, so it's clear which period/tap each entry belongs to instead of one lump number)
+function openThaiChuayHistoryModal(customerId){
+  const c = state.customers.find(x=>x.id===customerId);
   if(!c) return;
-  const debt = Number(c.debt||0);
-  const credit = Number(c.thaiChuayCredit||0);
-  const usedCredit = Math.min(debt, credit);
-  const remainingDebt = debt - usedCredit;
-  const remainingCredit = credit - usedCredit;
-  const resultText = remainingDebt>0
-    ? `ใช้เครดิตหักหนี้ได้ ฿${fmtMoney(usedCredit)} — ลูกค้ายังต้องจ่ายเพิ่มอีก ฿${fmtMoney(remainingDebt)} (เก็บผ่าน "💰 ชำระเงิน" ได้เลยหลังกดยืนยัน)`
-    : `ใช้เครดิตหักหนี้ได้ ฿${fmtMoney(usedCredit)} — หนี้หมดพอดี/มีเครดิตเหลือ ฿${fmtMoney(remainingCredit)} เก็บไว้ใช้ครั้งหน้า`;
+  const log = [...(c.thaiChuayCreditLog||[])].sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  const totalTimes = log.reduce((a,l)=>a+Number(l.times||1),0);
+  const totalAmount = log.reduce((a,l)=>a+Number(l.amount||0),0);
   const body = `
-    <h3>⚖️ หักหนี้ด้วยเครดิตไทยช่วยไทย — ${escapeHtml(c.name)}</h3>
-    <div class="rem-meta" style="margin-bottom:10px;line-height:1.6;">ใช้ตอนลูกค้ามีทั้งหนี้เก่าค้างอยู่ และมีเครดิตไทยช่วยไทยที่กดทิ้งไว้ — เอาเครดิตไปหักหนี้ก้อนนี้โดยเฉพาะ (คนละอันกับปุ่ม "✅ เคลียร์ครบ" ที่เอาไว้ปิดหนี้+คืนถังทั้งหมดตอนลูกค้าจ่ายสดเต็มจำนวน)</div>
-    <div class="field"><label>หนี้ค้างชำระปัจจุบัน</label><div class="mono" style="font-size:18px;color:var(--red);">฿${fmtMoney(debt)}</div></div>
-    <div class="field"><label>เครดิตไทยช่วยไทยคงเหลือ</label><div class="mono" style="font-size:18px;color:var(--green);">฿${fmtMoney(credit)}</div></div>
-    <div class="rem-meta" style="margin:10px 0;line-height:1.6;">${resultText}</div>
-    <div class="btnrow">
-      <button type="button" class="btn primary" id="confirmReconcileBtn">ยืนยันหักหนี้</button>
-      <button type="button" class="btn ghost" id="cancelModal">ยกเลิก</button>
+    <h3>🎫 ประวัติไทยช่วยไทย — ${escapeHtml(c.name)}</h3>
+    <div class="field"><label>เครดิตคงเหลือตอนนี้</label>
+      <div class="mono" style="font-size:18px;color:var(--green);">฿${fmtMoney(c.thaiChuayCredit||0)}</div>
+      <div class="rem-meta" style="margin-top:4px;">รวมประวัติ: กด ${totalTimes} ครั้ง ฿${fmtMoney(totalAmount)}</div>
+    </div>
+    <div class="rem-meta" style="margin:10px 0;">แตะ "แก้ไข" ถ้าต้องแก้ไขรายการเก่า หรือ "ลบ" ถ้ารายการนี้ผิด/ถูกยกเลิกสิทธิ์ — การแก้ไข/ลบตรงนี้แก้แค่ประวัติ ไม่กระทบยอดเครดิตคงเหลือด้านบน (ถ้าต้องปรับยอดคงเหลือด้วย ให้ไปแก้ที่หน้าโปรไฟล์ลูกค้า)</div>
+    ${log.length? log.map(l=>`
+      <div class="card" style="padding:10px 14px;margin-bottom:6px;">
+        <div style="display:flex;justify-content:space-between;gap:8px;">
+          <div>
+            <div style="font-weight:600;">฿${fmtMoney(l.amount)} ${l.times>1? `(×${l.times})`:''}</div>
+            <div class="rem-meta">${fmtDateShort(l.date)}</div>
+            ${l.note? `<div class="rem-meta">📝 ${escapeHtml(l.note)}</div>`:''}
+          </div>
+          <div class="btnrow" style="align-items:flex-start;">
+            <button type="button" class="btn ghost small" data-edit-thaichuay-log="${l.id}">แก้ไข</button>
+            <button type="button" class="btn danger small" data-del-thaichuay-log="${l.id}">ลบ</button>
+          </div>
+        </div>
+      </div>`).join('') : '<div class="empty">ยังไม่มีประวัติการกดไทยช่วยไทย</div>'}
+    <div class="btnrow" style="margin-top:12px;">
+      <button type="button" class="btn ghost" id="cancelModal">ปิด</button>
     </div>
   `;
   showModal(body);
-  document.getElementById('confirmReconcileBtn').addEventListener('click', ()=>{
-    adjustCustomerRemote(c.id, fresh=>{
+  document.querySelectorAll('[data-edit-thaichuay-log]').forEach(b=>b.addEventListener('click', ()=>{
+    openEditThaiChuayLogEntry(customerId, b.dataset.editThaichuayLog);
+  }));
+  document.querySelectorAll('[data-del-thaichuay-log]').forEach(b=>b.addEventListener('click', ()=>{
+    if(!confirm('ลบรายการประวัตินี้ใช่หรือไม่? (ไม่กระทบยอดเครดิตคงเหลือ)')) return;
+    adjustCustomerRemote(customerId, fresh=>{
       const updated = cloneCustomerForEdit(fresh);
-      const d = Number(updated.debt||0);
-      const cr = Number(updated.thaiChuayCredit||0);
-      const used = Math.min(d, cr);
-      updated.debt = d - used;
-      updated.thaiChuayCredit = cr - used;
+      updated.thaiChuayCreditLog = (updated.thaiChuayCreditLog||[]).filter(x=>x.id!==b.dataset.delThaichuayLog);
       return updated;
-    }).then(()=>render());
-    closeModal();
-    render();
+    }).then(()=>{ render(); openThaiChuayHistoryModal(customerId); });
+  }));
+}
+function openEditThaiChuayLogEntry(customerId, entryId){
+  const c = state.customers.find(x=>x.id===customerId);
+  if(!c) return;
+  const entry = (c.thaiChuayCreditLog||[]).find(x=>x.id===entryId);
+  if(!entry) return;
+  const body = `
+    <h3>แก้ไขประวัติไทยช่วยไทย</h3>
+    <form class="panel" id="editThaiChuayLogForm" novalidate>
+      <div class="field"><label>วันที่</label><input type="date" id="f_logDate" value="${entry.date||todayISO()}"></div>
+      <div class="field"><label>จำนวนเงิน (บาท)</label><input type="text" inputmode="decimal" min="0" step="1" id="f_logAmount" value="${Number(entry.amount||0)}"></div>
+      <div class="field"><label>จำนวนครั้ง</label><input type="text" inputmode="decimal" min="1" step="1" id="f_logTimes" value="${Number(entry.times||1)}"></div>
+      <div class="field"><label>หมายเหตุ</label><input id="f_logNote" value="${escapeAttr(entry.note||'')}"></div>
+      <div class="btnrow">
+        <button type="submit" class="btn primary">บันทึกการแก้ไข</button>
+        <button type="button" class="btn ghost" id="cancelModal">ยกเลิก</button>
+      </div>
+    </form>
+  `;
+  showModal(body);
+  document.getElementById('editThaiChuayLogForm').addEventListener('submit', e=>{
+    e.preventDefault();
+    const newDate = document.getElementById('f_logDate').value || entry.date;
+    const newAmount = Number(document.getElementById('f_logAmount').value)||0;
+    const newTimes = Math.max(1, Number(document.getElementById('f_logTimes').value)||1);
+    const newNote = document.getElementById('f_logNote').value.trim();
+    adjustCustomerRemote(customerId, fresh=>{
+      const updated = cloneCustomerForEdit(fresh);
+      updated.thaiChuayCreditLog = (updated.thaiChuayCreditLog||[]).map(x=> x.id===entryId? {...x, date:newDate, amount:newAmount, times:newTimes, note:newNote} : x);
+      return updated;
+    }).then(()=>{ render(); openThaiChuayHistoryModal(customerId); });
   });
 }
 
@@ -4130,6 +4233,9 @@ function openSaleForm(presetCustomerId, editId){
     }
     let customerId = document.getElementById('f_customer').value || null;
     const typedName = custSearchInput.value.trim();
+    // tracks whether customerId refers to a brand-new customer created in THIS very submit — see
+    // the debt/credit-applying block below for why this matters (race-condition fix)
+    let justCreatedNewCustomer = false;
     if(!customerId && typedName){
       const exactMatch = state.customers.find(c=>c.name.trim().toLowerCase()===typedName.toLowerCase());
       if(exactMatch){
@@ -4139,6 +4245,7 @@ function openSaleForm(presetCustomerId, editId){
         state.customers.push(newCust);
         persistCustomers();
         customerId = newCust.id;
+        justCreatedNewCustomer = true;
       }
     }
     const breakdown = (window._lineBuilders['sale']||[]).slice();
@@ -4189,11 +4296,13 @@ function openSaleForm(presetCustomerId, editId){
       applyDeliveryToInventory(data.gasBreakdown, data.cylinderPending);
       // ถังบนรถ (truck stock) อ้างอิงเฉพาะหน้างานส่งเท่านั้น — การบันทึกยอดขายที่หน้านี้ไม่กระทบถังบนรถ
       if(customerId){
-        adjustCustomerRemote(customerId, fresh=>{
+        const applyCustomerMutation = fresh=>{
           const updated = cloneCustomerForEdit(fresh);
           if(data.unpaid && runningResidual>0) updated.debt = Number(updated.debt||0) + runningResidual;
           if(creditApplied>0) updated.thaiChuayCredit = Math.max(0, Number(updated.thaiChuayCredit||0) - creditApplied);
           if(prachanatManualApplied>0) updated.prachanatCredit = Math.max(0, Number(updated.prachanatCredit||0) - prachanatManualApplied);
+          resetCreditLogIfDepleted(updated, 'thaiChuayCredit', 'thaiChuayCreditLog');
+          resetCreditLogIfDepleted(updated, 'prachanatCredit', 'prachanatCreditLog');
           if(tapThaiChuayNow){
             updated.thaiChuayCredit = Number(updated.thaiChuayCredit||0) + tapThaiChuayAmount - tapThaiChuayAutoApply;
             updated.thaiChuayCreditLog = [...(updated.thaiChuayCreditLog||[]), { id: uid(), date: todayISO(), amount: tapThaiChuayAmount, times: tapThaiChuayTimes, note: 'จ่ายด้วยไทยช่วยไทยตอนนี้เลย (ซื้อแก๊ส)' }];
@@ -4204,7 +4313,25 @@ function openSaleForm(presetCustomerId, editId){
           }
           if(data.cylinderPending && data.gasQty>0) addToCustomerGasBreakdown(updated, breakdownToLineItems(breakdown));
           return updated;
-        }).then(()=>render());
+        };
+        if(justCreatedNewCustomer){
+          // brand-new customer created earlier in THIS same submit — nothing could have raced to
+          // touch their record on the server yet (it doesn't exist there until persistCustomers()
+          // above actually finishes). Running the usual adjustCustomerRemote Firestore TRANSACTION
+          // here reads the server copy first, and if that read landed before the earlier
+          // persistCustomers() write reached the server, the transaction couldn't find this brand-new
+          // customer at all and silently failed — dropping the debt/credit for their very first sale
+          // ("เวลาเพิ่มลูกค้า แล้วกดค้างจ่าย ไม่ปรากฏหนี้ในหน้าลูกหนี้" bug). Applying the mutation
+          // straight to the local copy and persisting once avoids that race entirely.
+          const newCustLocal = state.customers.find(c=>c.id===customerId);
+          if(newCustLocal){
+            Object.assign(newCustLocal, applyCustomerMutation(newCustLocal));
+            persistCustomers();
+            render();
+          }
+        } else {
+          adjustCustomerRemote(customerId, applyCustomerMutation).then(()=>render());
+        }
         // full tapped amount is recognized as income NOW (same convention as the standalone
         // top-up forms) — the sale record's own creditApplied/prachanatCreditApplied already
         // subtracts the applied portion from ITS recognized income (see getPLItems), so this
@@ -5461,7 +5588,7 @@ function renderDebtorRow(c){
     </div>
     ${clockLine}
     ${c.phone? `<a href="tel:${escapeAttr(c.phone)}" style="display:inline-block;margin-top:4px;color:var(--orange-dark);font-weight:600;text-decoration:none;" onclick="event.stopPropagation();">📞 ${escapeHtml(c.phone)}</a>` : ''}
-    ${isExpanded? `<div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:10px;">${renderCustomerCard(c, {showClearAll:true, showInvoiceBtn:true})}</div>` : ''}
+    ${isExpanded? `<div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:10px;">${renderCustomerCard(c, {showInvoiceBtn:true})}</div>` : ''}
   </div>`;
 }
 
@@ -6115,6 +6242,8 @@ function openTaskCompleteForm(taskId){
         if(unpaid && residual>0) updated.debt = Number(updated.debt||0) + residual;
         if(creditApplied>0) updated.thaiChuayCredit = Math.max(0, Number(updated.thaiChuayCredit||0) - creditApplied);
         if(prachanatManualApplied>0) updated.prachanatCredit = Math.max(0, Number(updated.prachanatCredit||0) - prachanatManualApplied);
+        resetCreditLogIfDepleted(updated, 'thaiChuayCredit', 'thaiChuayCreditLog');
+        resetCreditLogIfDepleted(updated, 'prachanatCredit', 'prachanatCreditLog');
         if(tapThaiChuayNow){
           updated.thaiChuayCredit = Number(updated.thaiChuayCredit||0) + tapThaiChuayAmount - tapThaiChuayAutoApply;
           updated.thaiChuayCreditLog = [...(updated.thaiChuayCreditLog||[]), { id: uid(), date: todayISO(), amount: tapThaiChuayAmount, times: tapThaiChuayTimes, note: 'จ่ายด้วยไทยช่วยไทยตอนนี้เลย (ส่งแก๊ส)' }];
@@ -6734,27 +6863,6 @@ function attachHandlers(){
   const enableTaskNotifyBtn = document.getElementById('enableTaskNotifyBtn');
   if(enableTaskNotifyBtn) enableTaskNotifyBtn.addEventListener('click', requestTaskNotificationPermission);
   document.querySelectorAll('[data-task-filter]').forEach(b=>b.addEventListener('click', ()=>{ tasksFilterType = b.dataset.taskFilter; render(); }));
-  document.querySelectorAll('[data-clear-all-cust]').forEach(b=>b.addEventListener('click', ()=>{
-    const c = state.customers.find(x=>x.id===b.dataset.clearAllCust);
-    if(c && confirm(`เคลียร์หนี้และถังค้างของ "${c.name}" ทั้งหมดในครั้งเดียวใช่หรือไม่?`)){
-      const clearedDebt = Number(c.debt||0);
-      const clearedGas = Number(c.gasCylinders||0);
-      const clearedItems = breakdownToLineItems(c.gasCylindersBreakdown||[]);
-      if(clearedDebt>0){
-        const noteParts = [`เคลียร์หนี้ครบ ฿${fmtMoney(clearedDebt)}`];
-        if(clearedGas>0) noteParts.push(`คืนถัง ${clearedGas} ใบ`);
-        state.sales.push({ id: uid(), date: todayISO(), amount: clearedDebt, customerId: c.id, note: noteParts.join(' + '), gasQty: 0, unpaid:false, cylinderPending:false, createdAt: Date.now() });
-        persistSales();
-      }
-      c.debt = 0; c.gasCylinders = 0; c.gasCylindersBreakdown = [];
-      persistCustomers();
-      if(clearedItems.length){
-        clearedItems.forEach(item=>{ inventoryAddEmpty(item.size, item.brand, item.qty); });
-        persistInventory();
-      }
-      render();
-    }
-  }));
   document.querySelectorAll('[data-rank-sort]').forEach(b=>b.addEventListener('click', ()=>{ rankSort = b.dataset.rankSort; render(); }));
   document.querySelectorAll('[data-tasks-sort]').forEach(b=>b.addEventListener('click', ()=>{
     if(b.dataset.tasksSort === 'distance'){ selectDistanceTasksSort(); return; }
@@ -6864,7 +6972,7 @@ function attachHandlers(){
   document.querySelectorAll('[data-add-credit]').forEach(b=>b.addEventListener('click', ()=>openAddThaiChuayCreditPrompt(b.dataset.addCredit)));
   document.querySelectorAll('[data-add-prachanat-credit]').forEach(b=>b.addEventListener('click', ()=>openAddPrachanatCreditPrompt(b.dataset.addPrachanatCredit)));
   document.querySelectorAll('[data-open-prachanat-history]').forEach(b=>b.addEventListener('click', ()=>openPrachanatHistoryModal(b.dataset.openPrachanatHistory)));
-  document.querySelectorAll('[data-reconcile-credit]').forEach(b=>b.addEventListener('click', ()=>openReconcileThaiChuayPrompt(b.dataset.reconcileCredit)));
+  document.querySelectorAll('[data-open-thaichuay-history]').forEach(b=>b.addEventListener('click', ()=>openThaiChuayHistoryModal(b.dataset.openThaichuayHistory)));
   document.querySelectorAll('[data-reorder-cust]').forEach(b=>b.addEventListener('click', ()=>openSaleForm(b.dataset.reorderCust)));
   document.querySelectorAll('[data-edit-sale]').forEach(b=>b.addEventListener('click', ()=>openSaleForm(undefined, b.dataset.editSale)));
   document.querySelectorAll('[data-bill-sale]').forEach(b=>b.addEventListener('click', ()=>openSaleBillModal(b.dataset.billSale)));
