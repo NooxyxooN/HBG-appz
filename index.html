@@ -3151,8 +3151,8 @@ function renderCustomerCard(c, opts){
       ${Number(c.thaiChuayCredit||0)>0? `<span class="tag paid">🎫 เครดิตไทยช่วยไทย ฿${fmtMoney(c.thaiChuayCredit)}</span>` : ''}
       ${Number(c.prachanatCredit||0)>0? `<span class="tag paid">🪪 เครดิตประชารัฐ ฿${fmtMoney(c.prachanatCredit)}</span>` : ''}
     </div>
-    ${Number(c.thaiChuayCredit||0)>0 && (c.thaiChuayCreditLog||[]).length? `<div class="rem-meta" style="margin-top:2px;">🎫 ประวัติกดสะสม: ${c.thaiChuayCreditLog.reduce((a,l)=>a+Number(l.times||1),0)} ครั้ง รวม ฿${fmtMoney(c.thaiChuayCreditLog.reduce((a,l)=>a+Number(l.amount||0),0))}</div>` : ''}
-    ${Number(c.prachanatCredit||0)>0 && (c.prachanatCreditLog||[]).length? `<div class="rem-meta" style="margin-top:2px;">🪪 ประวัติกดสะสม: ${c.prachanatCreditLog.reduce((a,l)=>a+Number(l.times||1),0)} ครั้ง รวม ฿${fmtMoney(c.prachanatCreditLog.reduce((a,l)=>a+Number(l.amount||0),0))}</div>` : ''}
+    ${Number(c.thaiChuayCredit||0)>0 && (c.thaiChuayCreditLog||[]).length? (()=>{ const log=c.thaiChuayCreditLog; const lastDate=log.reduce((a,l)=>(!a||(l.date||'')>a)? l.date : a, ''); return `<div class="rem-meta" style="margin-top:2px;">🎫 ประวัติกดสะสม: ${log.reduce((a,l)=>a+Number(l.times||1),0)} ครั้ง รวม ฿${fmtMoney(log.reduce((a,l)=>a+Number(l.amount||0),0))}${lastDate? ` (ล่าสุด ${fmtDateShort(lastDate)})` : ''}</div>`; })() : ''}
+    ${Number(c.prachanatCredit||0)>0 && (c.prachanatCreditLog||[]).length? (()=>{ const log=c.prachanatCreditLog; const lastDate=log.reduce((a,l)=>(!a||(l.date||'')>a)? l.date : a, ''); return `<div class="rem-meta" style="margin-top:2px;">🪪 ประวัติกดสะสม: ${log.reduce((a,l)=>a+Number(l.times||1),0)} ครั้ง รวม ฿${fmtMoney(log.reduce((a,l)=>a+Number(l.amount||0),0))}${lastDate? ` (ล่าสุด ${fmtDateShort(lastDate)})` : ''}</div>`; })() : ''}
     ${c.notes? `<div class="rem-meta" style="margin-top:8px;">📝 ${escapeHtml(c.notes)}</div>`:''}
     <div class="btnrow">
       <button class="btn primary small" data-pay-cust="${c.id}">💰 ชำระเงิน</button>
