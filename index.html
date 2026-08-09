@@ -3635,7 +3635,7 @@ function openAddThaiChuayCreditPrompt(id){
 function openThaiChuayHistoryModal(customerId){
   const c = state.customers.find(x=>x.id===customerId);
   if(!c) return;
-  const log = [...(c.thaiChuayCreditLog||[])].sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  const log = [...(c.thaiChuayCreditLog||[])].sort((a,b)=>(a.date||'').localeCompare(b.date||''));
   const totalTimes = log.reduce((a,l)=>a+Number(l.times||1),0);
   const totalAmount = log.reduce((a,l)=>a+Number(l.amount||0),0);
   const body = `
@@ -3645,20 +3645,15 @@ function openThaiChuayHistoryModal(customerId){
       <div class="rem-meta" style="margin-top:4px;">รวมประวัติ: กด ${totalTimes} ครั้ง ฿${fmtMoney(totalAmount)}</div>
     </div>
     <div class="rem-meta" style="margin:10px 0;">แตะ "แก้ไข" ถ้าต้องแก้ไขรายการเก่า หรือ "ลบ" ถ้ารายการนี้ผิด/ถูกยกเลิกสิทธิ์ — การแก้ไข/ลบตรงนี้แก้แค่ประวัติ ไม่กระทบยอดเครดิตคงเหลือด้านบน (ถ้าต้องปรับยอดคงเหลือด้วย ให้ไปแก้ที่หน้าโปรไฟล์ลูกค้า)</div>
-    ${log.length? log.map(l=>`
-      <div class="card" style="padding:10px 14px;margin-bottom:6px;">
-        <div style="display:flex;justify-content:space-between;gap:8px;">
-          <div>
-            <div style="font-weight:600;">฿${fmtMoney(l.amount)} ${l.times>1? `(×${l.times})`:''}</div>
-            <div class="rem-meta">${fmtDateShort(l.date)}</div>
-            ${l.note? `<div class="rem-meta">📝 ${escapeHtml(l.note)}</div>`:''}
-          </div>
-          <div class="btnrow" style="align-items:flex-start;">
-            <button type="button" class="btn ghost small" data-edit-thaichuay-log="${l.id}">แก้ไข</button>
-            <button type="button" class="btn danger small" data-del-thaichuay-log="${l.id}">ลบ</button>
-          </div>
-        </div>
-      </div>`).join('') : '<div class="empty">ยังไม่มีประวัติการกดไทยช่วยไทย</div>'}
+    ${log.length? log.map((l,idx)=>`
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 4px;border-bottom:1px solid var(--border);">
+        <span style="min-width:58px;color:var(--ink-soft);font-size:13px;">ครั้งที่ ${idx+1}</span>
+        <span style="flex:1;font-weight:600;">฿${fmtMoney(l.amount)}${l.times>1? ` (×${l.times})`:''}</span>
+        <span style="color:var(--ink-soft);font-size:13px;">${fmtDateShort(l.date)}</span>
+        <button type="button" class="btn ghost small" data-edit-thaichuay-log="${l.id}">แก้ไข</button>
+        <button type="button" class="btn danger small" data-del-thaichuay-log="${l.id}">ลบ</button>
+      </div>
+      ${l.note? `<div class="rem-meta" style="padding-left:4px;margin-top:-2px;margin-bottom:4px;">📝 ${escapeHtml(l.note)}</div>`:''}`).join('') : '<div class="empty">ยังไม่มีประวัติการกดไทยช่วยไทย</div>'}
     <div class="btnrow" style="margin-top:12px;">
       <button type="button" class="btn ghost" id="cancelModal">ปิด</button>
     </div>
@@ -3825,7 +3820,7 @@ function openAddPrachanatCreditPrompt(id){
 function openPrachanatHistoryModal(customerId){
   const c = state.customers.find(x=>x.id===customerId);
   if(!c) return;
-  const log = [...(c.prachanatCreditLog||[])].sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  const log = [...(c.prachanatCreditLog||[])].sort((a,b)=>(a.date||'').localeCompare(b.date||''));
   const totalTimes = log.reduce((a,l)=>a+Number(l.times||1),0);
   const totalAmount = log.reduce((a,l)=>a+Number(l.amount||0),0);
   const body = `
@@ -3835,20 +3830,15 @@ function openPrachanatHistoryModal(customerId){
       <div class="rem-meta" style="margin-top:4px;">รวมประวัติ: กด ${totalTimes} ครั้ง ฿${fmtMoney(totalAmount)}</div>
     </div>
     <div class="rem-meta" style="margin:10px 0;">แตะ "แก้ไข" ถ้าต้องแก้ไขรายการเก่า หรือ "ลบ" ถ้ารายการนี้ผิด/ถูกยกเลิกสิทธิ์ — การแก้ไข/ลบตรงนี้แก้แค่ประวัติ ไม่กระทบยอดเครดิตคงเหลือด้านบน (ถ้าต้องปรับยอดคงเหลือด้วย ให้ไปแก้ที่หน้าโปรไฟล์ลูกค้า)</div>
-    ${log.length? log.map(l=>`
-      <div class="card" style="padding:10px 14px;margin-bottom:6px;">
-        <div style="display:flex;justify-content:space-between;gap:8px;">
-          <div>
-            <div style="font-weight:600;">฿${fmtMoney(l.amount)} ${l.times>1? `(×${l.times})`:''}</div>
-            <div class="rem-meta">${fmtDateShort(l.date)}${l.staffName? ' · '+escapeHtml(l.staffName):''}</div>
-            ${l.note? `<div class="rem-meta">📝 ${escapeHtml(l.note)}</div>`:''}
-          </div>
-          <div class="btnrow" style="align-items:flex-start;">
-            <button type="button" class="btn ghost small" data-edit-prachanat-log="${l.id}">แก้ไข</button>
-            <button type="button" class="btn danger small" data-del-prachanat-log="${l.id}">ลบ</button>
-          </div>
-        </div>
-      </div>`).join('') : '<div class="empty">ยังไม่มีประวัติการใช้บัตรประชารัฐ</div>'}
+    ${log.length? log.map((l,idx)=>`
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 4px;border-bottom:1px solid var(--border);">
+        <span style="min-width:58px;color:var(--ink-soft);font-size:13px;">ครั้งที่ ${idx+1}</span>
+        <span style="flex:1;font-weight:600;">฿${fmtMoney(l.amount)}${l.times>1? ` (×${l.times})`:''}</span>
+        <span style="color:var(--ink-soft);font-size:13px;">${fmtDateShort(l.date)}${l.staffName? ' · '+escapeHtml(l.staffName):''}</span>
+        <button type="button" class="btn ghost small" data-edit-prachanat-log="${l.id}">แก้ไข</button>
+        <button type="button" class="btn danger small" data-del-prachanat-log="${l.id}">ลบ</button>
+      </div>
+      ${l.note? `<div class="rem-meta" style="padding-left:4px;margin-top:-2px;margin-bottom:4px;">📝 ${escapeHtml(l.note)}</div>`:''}`).join('') : '<div class="empty">ยังไม่มีประวัติการใช้บัตรประชารัฐ</div>'}
     <div class="btnrow" style="margin-top:12px;">
       <button type="button" class="btn ghost" id="cancelModal">ปิด</button>
     </div>
