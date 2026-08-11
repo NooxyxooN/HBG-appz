@@ -563,6 +563,16 @@ let dailyNoteExpanded = true;
 let remindersDoneExpanded = false;
 let tasksFilterType = 'all';
 let customerSearchQuery = '';
+// each keystroke in a search box used to trigger an immediate full render() — rebuilding the entire
+// tab's HTML (every card, icon, computed stat) and re-attaching every event handler on the page —
+// which visibly lags typing once there are a lot of customers/tasks/debtors. Debouncing so render()
+// only actually fires ~150ms after the last keystroke keeps the input itself instant (typing into a
+// plain <input> never waits on render) while still filtering live once you pause for a beat.
+let searchRenderTimer = null;
+function debounceSearchRender(fn){
+  clearTimeout(searchRenderTimer);
+  searchRenderTimer = setTimeout(fn, 150);
+}
 
 // keep a customer's detailed borrowed-cylinder breakdown (by size+brand) in sync with the flat gasCylinders total
 function addToCustomerGasBreakdown(c, items){
@@ -6834,10 +6844,12 @@ function attachHandlers(){
   const debtorSearchInput = document.getElementById('debtorSearchInput');
   if(debtorSearchInput) debtorSearchInput.addEventListener('input', ()=>{
     debtorSearchQuery = debtorSearchInput.value;
-    const cursorPos = debtorSearchInput.selectionStart;
-    render();
-    const newInput = document.getElementById('debtorSearchInput');
-    if(newInput){ newInput.focus(); newInput.setSelectionRange(cursorPos, cursorPos); }
+    debounceSearchRender(()=>{
+      const cursorPos = debtorSearchInput.selectionStart;
+      render();
+      const newInput = document.getElementById('debtorSearchInput');
+      if(newInput){ newInput.focus(); newInput.setSelectionRange(cursorPos, cursorPos); }
+    });
   });
   const toggleTasksFilter = document.getElementById('toggleTasksFilter');
   if(toggleTasksFilter) toggleTasksFilter.addEventListener('click', ()=>{ tasksFilterOpen = !tasksFilterOpen; render(); });
@@ -6865,10 +6877,12 @@ function attachHandlers(){
   const taskSearchInput = document.getElementById('taskSearchInput');
   if(taskSearchInput) taskSearchInput.addEventListener('input', ()=>{
     taskSearchQuery = taskSearchInput.value;
-    const cursorPos = taskSearchInput.selectionStart;
-    render();
-    const newInput = document.getElementById('taskSearchInput');
-    if(newInput){ newInput.focus(); newInput.setSelectionRange(cursorPos, cursorPos); }
+    debounceSearchRender(()=>{
+      const cursorPos = taskSearchInput.selectionStart;
+      render();
+      const newInput = document.getElementById('taskSearchInput');
+      if(newInput){ newInput.focus(); newInput.setSelectionRange(cursorPos, cursorPos); }
+    });
   });
   document.querySelectorAll('[data-quick-pay-purchase]').forEach(b=>b.addEventListener('click', ()=>openPurchaseQuickPayForm(b.dataset.quickPayPurchase)));
   document.querySelectorAll('[data-edit-purchase]').forEach(b=>b.addEventListener('click', ()=>openPurchaseForm(b.dataset.editPurchase)));
@@ -6977,10 +6991,12 @@ function attachHandlers(){
   const custSearchInput = document.getElementById('custSearchInput');
   if(custSearchInput) custSearchInput.addEventListener('input', ()=>{
     customerSearchQuery = custSearchInput.value;
-    const cursorPos = custSearchInput.selectionStart;
-    render();
-    const newInput = document.getElementById('custSearchInput');
-    if(newInput){ newInput.focus(); newInput.setSelectionRange(cursorPos, cursorPos); }
+    debounceSearchRender(()=>{
+      const cursorPos = custSearchInput.selectionStart;
+      render();
+      const newInput = document.getElementById('custSearchInput');
+      if(newInput){ newInput.focus(); newInput.setSelectionRange(cursorPos, cursorPos); }
+    });
   });
   document.querySelectorAll('[data-del-cust]').forEach(b=>b.addEventListener('click', ()=>{
     const c = state.customers.find(x=>x.id===b.dataset.delCust);
