@@ -4707,7 +4707,7 @@ function buildBillHtml(record, kind, senderName, address, qrPayId, qrLineId){
   const d = new Date(dateBase+'T00:00:00');
   const thAbbrevMonths = ['มค','กพ','มีค','เมย','พค','มิย','กค','สค','กย','ตค','พย','ธค'];
   const dateStr = `${d.getDate()}${thAbbrevMonths[d.getMonth()]}.${String(d.getFullYear()+543).slice(-2)}`;
-  const billNo = dateBase.replace(/-/g,'') + '-' + record.id.slice(-4).toUpperCase();
+  const billNo = dateBase.replace(/-/g,'') + '-' + (record.id ? record.id.slice(-4).toUpperCase() : 'XXXX');
   const isEstimate = kind==='task';
   const amount = kind==='sale' ? Number(record.amount||0) : computeSuggestedPrice(record.gasBreakdown, false) + sumOtherItemsTotal(record.otherItems);
   const billTitle = isEstimate ? 'ใบส่งของ (ประมาณการ)' : 'ใบเสร็จรับเงิน';
@@ -4762,7 +4762,7 @@ function buildBillHtmlCompact(record, kind, senderName, address){
   const d = new Date(dateBase+'T00:00:00');
   const thAbbrevMonths = ['มค','กพ','มีค','เมย','พค','มิย','กค','สค','กย','ตค','พย','ธค'];
   const dateStr = `${d.getDate()}${thAbbrevMonths[d.getMonth()]}.${String(d.getFullYear()+543).slice(-2)}`;
-  const billNo = dateBase.replace(/-/g,'') + '-' + record.id.slice(-4).toUpperCase();
+  const billNo = dateBase.replace(/-/g,'') + '-' + (record.id ? record.id.slice(-4).toUpperCase() : 'XXXX');
   const isEstimate = kind==='task';
   const amount = kind==='sale' ? Number(record.amount||0) : computeSuggestedPrice(record.gasBreakdown, false) + sumOtherItemsTotal(record.otherItems);
   const billTitle = isEstimate ? 'ใบส่งของ (ประมาณการ)' : 'ใบเสร็จรับเงิน';
@@ -4882,14 +4882,19 @@ async function generateAndShareBill(record, kind, triggerBtn){
   const qrLineId = 'qrLine_' + uid();
   const container = document.createElement('div');
   container.style.cssText = `position:fixed;left:-9999px;top:0;width:${widthPx}px;background:#ffffff;color:#232A22;font-family:'Sarabun',sans-serif;padding:14px;line-height:1.5;`;
-  container.innerHTML = isNotice
-    ? buildNoticeCardHtml(record, kind, senderName, address, qrPayId, qrLineId)
-    : isCompactReceipt
-      ? buildBillHtmlCompact(record, kind, senderName, address)
-      : buildBillHtml(record, kind, senderName, address, qrPayId, qrLineId);
-  document.body.appendChild(container);
   const docLabel = isNotice ? 'ใบแจ้งหนี้' : 'บิล';
+  // building the markup (buildNoticeCardHtml/buildBillHtmlCompact/buildBillHtml) now happens inside
+  // this try block too — it used to run before the try/catch, so a bad/incomplete record (e.g. the
+  // synthetic debt-only record from openDebtorBillModal missing a field the builder expected) threw
+  // an uncaught error: the button got stuck on "⏳ กำลังสร้าง..." forever with zero feedback to the
+  // shop, since neither the catch's error message nor the finally's button-reset ever ran.
   try{
+    container.innerHTML = isNotice
+      ? buildNoticeCardHtml(record, kind, senderName, address, qrPayId, qrLineId)
+      : isCompactReceipt
+        ? buildBillHtmlCompact(record, kind, senderName, address)
+        : buildBillHtml(record, kind, senderName, address, qrPayId, qrLineId);
+    document.body.appendChild(container);
     const amount = kind==='sale' ? Number(record.amount||0) : computeSuggestedPrice(record.gasBreakdown, false) + sumOtherItemsTotal(record.otherItems);
     const qrSize = isNotice ? 240 : 120; // notice card is printed small and taped outdoors — QR needs to stay scannable
     // the compact 130x53mm receipt has no QR section in its markup at all — skip QR generation entirely
@@ -4925,7 +4930,7 @@ async function generateAndShareBill(record, kind, triggerBtn){
     console.error('bill export failed', e);
     showSaveError(`สร้าง${docLabel}ไม่สำเร็จ: ` + (e && e.message ? e.message : String(e)));
   } finally {
-    document.body.removeChild(container);
+    if(container.parentNode) document.body.removeChild(container); // only if the innerHTML step actually got far enough to attach it
     if(triggerBtn){ triggerBtn.textContent = originalLabel; triggerBtn.disabled = false; }
   }
 }
@@ -4956,6 +4961,8 @@ function openDebtorBillModal(customerId){
   if(Number(c.debt||0)<=0 && Number(c.gasCylinders||0)<=0){ showSaveError('ลูกค้ารายนี้ไม่มียอดค้างชำระ'); return; }
   const gasNote = Number(c.gasCylinders||0)>0 ? ` (ยังมีถังค้างคืนอีก ${c.gasCylinders} ใบ แยกจากยอดนี้)` : '';
   const record = {
+    id: uid(), // synthetic record (this debt isn't tied to one specific sale/task) — still needs an id
+    // because buildBillHtml/buildBillHtmlCompact use it to print a bill number
     customerId: c.id,
     date: todayISO(),
     amount: Number(c.debt||0),
