@@ -4543,12 +4543,20 @@ function buildPromptPayPayload(target, amount){
   return body + ppTlv('63', crc16Promptpay(body + '6304'));
 }
 
+// the "ปักหมุด" GPS button on the customer form (see f_address GPS handler) fills c.address with a
+// raw "lat,lng" string like "18.812345,99.123456" — not a URL, so the old http(s) check let it slip
+// straight through onto printed bills as a meaningless string of numbers. Catches that shape too.
+function isRawMapCoordinate(str){
+  return /^-?\d{1,3}(\.\d+)?\s*,\s*-?\d{1,3}(\.\d+)?$/.test((str||'').trim());
+}
 /* who to attribute a customer's printed bill address to, so it can be remembered without a full customer record */
 function getDefaultBillAddress(record, kind){
   const cust = record.customerId ? state.customers.find(c=>c.id===record.customerId) : null;
   if(cust){
     if(cust.billAddress) return cust.billAddress;
-    if(cust.address && !/^https?:\/\//i.test(cust.address)) return cust.address; // never prefill a Google Maps link/pin onto the printed bill
+    // never prefill a Google Maps link/pin OR raw lat,lng coordinates onto the printed bill — only an
+    // actual typed address is fit to print (staff can still type the real address in before confirming)
+    if(cust.address && !/^https?:\/\//i.test(cust.address) && !isRawMapCoordinate(cust.address)) return cust.address;
     return '';
   }
   const name = (kind==='task' ? record.customName : record.note) || '';
@@ -4709,8 +4717,11 @@ function buildBillHtml(record, kind, senderName, address, qrPayId, qrLineId){
   const dateStr = `${d.getDate()}${thAbbrevMonths[d.getMonth()]}.${String(d.getFullYear()+543).slice(-2)}`;
   const billNo = dateBase.replace(/-/g,'') + '-' + (record.id ? record.id.slice(-4).toUpperCase() : 'XXXX');
   const isEstimate = kind==='task';
+  // "ใบเสร็จรับเงิน" (payment receipt) only makes sense once money has actually changed hands — a
+  // completed delivery that's still unpaid (ค้างจ่าย) is a delivery slip with an outstanding balance,
+  // not proof of payment, so it gets its own title instead of quietly implying the bill was settled
   const amount = kind==='sale' ? Number(record.amount||0) : computeSuggestedPrice(record.gasBreakdown, false) + sumOtherItemsTotal(record.otherItems);
-  const billTitle = isEstimate ? 'ใบส่งของ (ประมาณการ)' : 'ใบเสร็จรับเงิน';
+  const billTitle = isEstimate ? 'ใบส่งของ (ประมาณการ)' : (record.unpaid ? 'ใบส่งของ (ค้างชำระ)' : 'ใบเสร็จรับเงิน');
   const itemsTable = buildItemsTableHtml(record, amount);
 
   return `
@@ -4764,8 +4775,11 @@ function buildBillHtmlCompact(record, kind, senderName, address){
   const dateStr = `${d.getDate()}${thAbbrevMonths[d.getMonth()]}.${String(d.getFullYear()+543).slice(-2)}`;
   const billNo = dateBase.replace(/-/g,'') + '-' + (record.id ? record.id.slice(-4).toUpperCase() : 'XXXX');
   const isEstimate = kind==='task';
+  // "ใบเสร็จรับเงิน" (payment receipt) only makes sense once money has actually changed hands — a
+  // completed delivery that's still unpaid (ค้างจ่าย) is a delivery slip with an outstanding balance,
+  // not proof of payment, so it gets its own title instead of quietly implying the bill was settled
   const amount = kind==='sale' ? Number(record.amount||0) : computeSuggestedPrice(record.gasBreakdown, false) + sumOtherItemsTotal(record.otherItems);
-  const billTitle = isEstimate ? 'ใบส่งของ (ประมาณการ)' : 'ใบเสร็จรับเงิน';
+  const billTitle = isEstimate ? 'ใบส่งของ (ประมาณการ)' : (record.unpaid ? 'ใบส่งของ (ค้างชำระ)' : 'ใบเสร็จรับเงิน');
   const itemsTable = buildItemsTableHtml(record, amount);
 
   // wrapped in a font-size:1.3em box so every em-based rule below scales up together — makes the
@@ -4968,6 +4982,7 @@ function openDebtorBillModal(customerId){
     amount: Number(c.debt||0),
     gasBreakdown: [],
     otherItems: [],
+    unpaid: true, // this is by definition an outstanding balance — must never print as "ใบเสร็จรับเงิน" (paid receipt)
     note: 'ยอดค้างชำระสะสม' + gasNote
   };
   const btn = document.querySelector(`[data-bill-debtor="${customerId}"]`);
