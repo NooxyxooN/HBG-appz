@@ -1390,10 +1390,49 @@ document.getElementById('fab').addEventListener('click', ()=>{
   else openCustomerForm();
 });
 
+// a "🚚 แจ้งให้ส่ง" reminder turns into an actual (blank — no quantities yet) card on the Tasks tab the
+// day it comes due, so nobody has to remember to separately go add the delivery once the reminder
+// pops up — they just open the card, fill in what's being delivered, and send as normal. Idempotent
+// per occurrence via spawnedForDate: once a reminder's current dueDate has already spawned its task,
+// it won't spawn a second one every render — but if the reminder repeats and its dueDate later moves
+// forward (via toggleReminder, after the matching task gets completed — see resolveReminderForTask),
+// spawnedForDate no longer matches the new dueDate and it's free to spawn again next time it's due.
+function autoSpawnDeliveryReminders(){
+  const today = todayISO();
+  let changed = false;
+  state.reminders.forEach(r=>{
+    if(r.type!=='delivery' || r.done || !r.customerId) return;
+    if(r.dueDate > today) return;
+    if(r.spawnedForDate === r.dueDate) return;
+    if(!state.customers.some(c=>c.id===r.customerId)) return; // linked customer got deleted
+    state.tasks.push({
+      id: uid(), createdAt: todayISO(), addedAt: Date.now(),
+      customerId: r.customerId, customName: null, phone:'', address:'', houseNo:'', soi:'', moo:'', landmark:'',
+      gasBreakdown: [], otherItems: [],
+      note: `🚨 มาจากแจ้งเตือน: ${r.title}`,
+      sourceReminderId: r.id
+    });
+    r.spawnedForDate = r.dueDate;
+    changed = true;
+  });
+  if(changed){ persistTasks(); persistReminders(); }
+}
+// once the งานส่ง card that a delivery reminder spawned actually gets completed, the reminder itself
+// needs to move on too — otherwise it'd just sit there "due today" forever (and re-spawn a duplicate
+// blank card on the next render, since spawnedForDate never advances). Reuses the exact same
+// once-vs-repeat logic as manually checking a reminder off from the Reminders tab.
+function resolveReminderForTask(task){
+  if(!task || !task.sourceReminderId) return;
+  const r = state.reminders.find(x=>x.id===task.sourceReminderId);
+  if(!r || r.done) return;
+  toggleReminder(r.id);
+}
+
 /* ---------------- render root ---------------- */
 function render(){
   const app = document.getElementById('app');
   if(!state.loaded){ app.innerHTML = '<div class="empty">กำลังโหลดข้อมูล...</div>'; return; }
+  autoSpawnDeliveryReminders();
   // preserve whatever text box someone is actively typing into (plus cursor position) across this
   // re-render. render() gets called for all sorts of reasons that have nothing to do with what's being
   // typed — a realtime update arriving from Firestore, the once-a-minute Tasks-tab refresh, etc — and
@@ -5925,6 +5964,8 @@ function openTaskForm(editId){
         <div class="field">
           <label>ที่อยู่/ลิงก์แผนที่ (ถ้ามี)</label>
           <input id="f_taskAddress" value="${editing? escapeAttr(editing.address||''):''}">
+          <button type="button" class="btn ghost small" id="useTaskLocationBtn" style="margin-top:6px;">📍 ปักหมุด ณ ตำแหน่งปัจจุบัน</button>
+          <div id="taskLocationStatus" class="rem-meta" style="margin-top:4px;"></div>
         </div>
       </div>
       <div class="field"><label>ถังที่จะส่ง</label>${lineItemBuilderHtml('taskLine', editing? breakdownToLineItems(editing.gasBreakdown) : [])}</div>
@@ -6027,6 +6068,26 @@ function openTaskForm(editId){
     if(newLandmarkFieldDiv) newLandmarkFieldDiv.style.display = '';
     custInfoBlock.style.display = 'none';
     renderSuggestions();
+  });
+  // same "pin where I'm standing right now" shortcut as the customer form's f_address field — handy
+  // when the driver is already at a brand-new customer's house and just wants to drop a pin instead of
+  // hunting for a Google Maps link (see isRawMapCoordinate for where this raw "lat,lng" shape gets
+  // excluded again later, e.g. never printed onto a bill)
+  const useTaskLocationBtn = document.getElementById('useTaskLocationBtn');
+  if(useTaskLocationBtn) useTaskLocationBtn.addEventListener('click', ()=>{
+    const statusEl = document.getElementById('taskLocationStatus');
+    if(!navigator.geolocation){
+      statusEl.textContent = 'อุปกรณ์นี้ไม่รองรับการระบุตำแหน่ง กรุณาวางลิงก์ Google Maps แทน';
+      return;
+    }
+    statusEl.textContent = 'กำลังค้นหาตำแหน่ง...';
+    navigator.geolocation.getCurrentPosition(pos=>{
+      const {latitude, longitude} = pos.coords;
+      document.getElementById('f_taskAddress').value = `${latitude.toFixed(6)},${longitude.toFixed(6)}`;
+      statusEl.textContent = '✓ บันทึกตำแหน่งปัจจุบันแล้ว';
+    }, err=>{
+      statusEl.textContent = 'ไม่สามารถเข้าถึงตำแหน่งได้ — กรุณาอนุญาตการเข้าถึงตำแหน่งที่ตั้ง หรือวางลิงก์ Google Maps แทน';
+    }, {enableHighAccuracy:true, timeout:8000});
   });
 
   if(editing){
@@ -6288,6 +6349,7 @@ function openTaskCompleteForm(taskId){
       if(tapPrachanatNow) state.transactions.push({ id: uid(), type:'income', date: todayISO(), amount: tapPrachanatAmount, note: `เครดิตบัตรประชารัฐ (กดตอนนี้เลย) — ${displayName}` });
       persistTransactions();
     }
+    resolveReminderForTask(t); // if this card came from a "🚚 แจ้งให้ส่ง" reminder, move the reminder on now that it's actually delivered
     state.tasks = state.tasks.filter(x=>x.id!==taskId);
     persistTasks();
     closeModal();
@@ -6347,10 +6409,10 @@ function renderReminderCard(r){
     <div class="checkbox ${r.done?'done':''} ${overdue?'overdue':''}" data-toggle-rem="${r.id}">${r.done?'✓':''}</div>
     <div style="flex:1;">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
-        <div class="rem-title">${escapeHtml(r.title)}</div>
+        <div class="rem-title">${r.type==='delivery'? '🚚 ' : ''}${escapeHtml(r.title)}</div>
         <button type="button" class="btn ghost small" style="padding:2px 10px;" data-toggle-rem-menu="${r.id}">⋮</button>
       </div>
-      <div class="rem-meta ${overdue?'overdue':''}">${fmtDateShort(r.dueDate)} · ${repeatLabel}${cust? ' · '+escapeHtml(cust.name):''}${overdue?' · เลยกำหนด':''}</div>
+      <div class="rem-meta ${overdue?'overdue':''}">${fmtDateShort(r.dueDate)} · ${repeatLabel}${cust? ' · '+escapeHtml(cust.name):''}${overdue?' · เลยกำหนด':''}${r.type==='delivery' && r.spawnedForDate===r.dueDate? ' · ✅ ขึ้นงานส่งแล้ว' : ''}</div>
       ${menuOpen? `
       <div class="btnrow" style="margin-top:6px;">
         <button class="btn ghost small" data-edit-rem="${r.id}">✏️ แก้ไข</button>
@@ -6365,9 +6427,19 @@ function openReminderForm(presetTitle, presetCustomerId, editId){
   const editing = editId? state.reminders.find(r=>r.id===editId) : null;
   const presetCust = editing? (editing.customerId? state.customers.find(c=>c.id===editing.customerId) : null)
     : (presetCustomerId? state.customers.find(c=>c.id===presetCustomerId) : null);
+  const initialType = editing? (editing.type||'general') : 'general';
   const body = `
     <h3>${editing? 'แก้ไขแจ้งเตือน' : 'เพิ่มแจ้งเตือน'}</h3>
     <form class="panel" id="remForm" novalidate>
+      <div class="field">
+        <label>ประเภท</label>
+        <div class="btnrow">
+          <button type="button" class="btn ${initialType==='general'?'primary':'ghost'} small" data-pick-rem-type="general">🔔 แจ้งเตือนทั่วไป</button>
+          <button type="button" class="btn ${initialType==='delivery'?'primary':'ghost'} small" data-pick-rem-type="delivery">🚚 แจ้งให้ส่ง</button>
+        </div>
+        <input type="hidden" id="f_remType" value="${initialType}">
+        <div class="rem-meta" style="margin-top:4px;">"แจ้งให้ส่ง" จะขึ้นเป็นการ์ดงานส่งเปล่าๆ ในหน้างานส่งอัตโนมัติ ให้พอถึงวันที่กำหนด — ต้องเลือกลูกค้าด้วย</div>
+      </div>
       <div class="field">
         <label>หัวข้อ *</label>
         <input id="f_title" placeholder="เช่น เก็บเงินค่าถังแก๊ส" value="${escapeAttr(editing? editing.title : (presetTitle||''))}">
@@ -6385,10 +6457,11 @@ function openReminderForm(presetTitle, presetCustomerId, editId){
         </div>
       </div>
       <div class="field">
-        <label>ลูกค้าที่เกี่ยวข้อง (ถ้ามี)</label>
+        <label id="f_remCustLabel">ลูกค้าที่เกี่ยวข้อง${initialType==='delivery'? ' *' : ' (ถ้ามี)'}</label>
         <input id="f_remCustSearch" placeholder="🔍 พิมพ์ชื่อลูกค้า..." value="${escapeAttr(presetCust? presetCust.name : '')}">
         <input type="hidden" id="f_customer" value="${presetCust? presetCust.id : ''}">
         <div id="remCustSuggestions" style="margin-top:6px;"></div>
+        <div id="remCustError" class="rem-meta" style="color:var(--red);display:none;margin-top:4px;">แจ้งให้ส่งต้องเลือกลูกค้าก่อนบันทึก</div>
       </div>
       <div class="btnrow">
         <button type="submit" class="btn primary">บันทึก</button>
@@ -6397,6 +6470,11 @@ function openReminderForm(presetTitle, presetCustomerId, editId){
       </div>
     </form>`;
   showModal(body);
+  document.querySelectorAll('[data-pick-rem-type]').forEach(b=>b.addEventListener('click', ()=>{
+    document.getElementById('f_remType').value = b.dataset.pickRemType;
+    document.querySelectorAll('[data-pick-rem-type]').forEach(x=>{ x.classList.toggle('primary', x===b); x.classList.toggle('ghost', x!==b); });
+    document.getElementById('f_remCustLabel').textContent = b.dataset.pickRemType==='delivery' ? 'ลูกค้าที่เกี่ยวข้อง *' : 'ลูกค้าที่เกี่ยวข้อง (ถ้ามี)';
+  }));
 
   const searchInput = document.getElementById('f_remCustSearch');
   const suggestBox = document.getElementById('remCustSuggestions');
@@ -6438,17 +6516,29 @@ function openReminderForm(presetTitle, presetCustomerId, editId){
       document.getElementById('f_title').focus();
       return;
     }
+    const type = document.getElementById('f_remType').value;
+    const customerId = document.getElementById('f_customer').value || null;
+    if(type==='delivery' && !customerId){
+      document.getElementById('remCustError').style.display = 'block';
+      document.getElementById('f_remCustSearch').focus();
+      return;
+    }
+    const newDueDate = document.getElementById('f_due').value || todayISO();
     const data = {
       title,
-      dueDate: document.getElementById('f_due').value || todayISO(),
+      type,
+      dueDate: newDueDate,
       repeat: document.getElementById('f_repeat').value,
-      customerId: document.getElementById('f_customer').value || null
+      customerId
     };
     if(editing){
+      // due date changed by hand (not via the normal complete-and-advance flow) — treat it as a fresh
+      // occurrence so a delivery reminder is eligible to auto-spawn its งานส่ง card again
+      if(editing.dueDate !== newDueDate) editing.spawnedForDate = null;
       Object.assign(editing, data);
       openReminderMenuIds.delete(editId);
     } else {
-      state.reminders.push({ id:uid(), ...data, done:false });
+      state.reminders.push({ id:uid(), ...data, done:false, spawnedForDate:null });
     }
     persistReminders();
     closeModal();
