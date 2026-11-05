@@ -563,6 +563,8 @@ let dailyNoteExpanded = true;
 let remindersDoneExpanded = false;
 let tasksFilterType = 'all';
 let customerSearchQuery = '';
+const CUSTOMERS_PAGE_SIZE = 30;
+let customersShownLimit = CUSTOMERS_PAGE_SIZE; // reset whenever the search/filter/sort changes
 // each keystroke in a search box used to trigger an immediate full render() — rebuilding the entire
 // tab's HTML (every card, icon, computed stat) and re-attaching every event handler on the page —
 // which visibly lags typing once there are a lot of customers/tasks/debtors. Debouncing so render()
@@ -651,8 +653,19 @@ function getCustomerCycleInfo(customerId){
 const CUSTOMER_TIER_CROWN_MAX_DAYS = 12;
 const CUSTOMER_TIER_REGULAR_MAX_DAYS = 28;
 const CUSTOMER_TIER_OCCASIONAL_MAX_DAYS = 60;
+// sales grouped by customerId, built once and reused for the rest of the current render() pass —
+// tier + last-order used to each re-scan the ENTIRE sales list once per customer card, so drawing
+// the Customers list cost (customers × sales) twice over, on every single search keystroke.
+// render() clears this at the start of every pass, so edits are never stale.
+let _salesByCustomerCache = null;
+function getSalesByCustomer(){
+  if(_salesByCustomerCache) return _salesByCustomerCache;
+  const m = {};
+  state.sales.forEach(s=>{ if(s.customerId){ (m[s.customerId] = m[s.customerId] || []).push(s); } });
+  return (_salesByCustomerCache = m);
+}
 function getCustomerTier(customerId){
-  const salesAll = state.sales.filter(s=>s.customerId===customerId);
+  const salesAll = getSalesByCustomer()[customerId] || [];
   if(salesAll.length < 2) return 'new';
   const lastDate = salesAll.reduce((max,s)=> (s.date||'') > max? s.date : max, salesAll[0].date||'');
   const daysSinceLast = Math.round((Date.now() - Date.parse(lastDate)) / 86400000);
@@ -680,7 +693,7 @@ const CUSTOMER_TIER_LABELS = { new:'🆕 ลูกค้าใหม่', crown:
 // request to drop the cycle-prediction math ("อยากรู้ว่าแค่ว่า สั่งล่าสุดเมื่อไหร่ แค่นั้นก็พอ").
 // Shown on every customer card (Customers tab) rather than a separate curated dashboard list.
 function getCustomerLastOrder(customerId){
-  const dates = state.sales.filter(s=>s.customerId===customerId && Number(s.gasQty||0)>0).map(s=>s.date);
+  const dates = (getSalesByCustomer()[customerId] || []).filter(s=>Number(s.gasQty||0)>0).map(s=>s.date);
   if(!dates.length) return null;
   const lastDate = dates.reduce((max,d)=> d>max? d : max, dates[0]);
   const daysSinceLast = Math.round((Date.now() - Date.parse(lastDate)) / 86400000);
@@ -1430,6 +1443,7 @@ function resolveReminderForTask(task){
 function render(){
   const app = document.getElementById('app');
   if(!state.loaded){ app.innerHTML = '<div class="empty">กำลังโหลดข้อมูล...</div>'; return; }
+  _salesByCustomerCache = null;
   autoSpawnDeliveryReminders();
   // preserve whatever text box someone is actively typing into (plus cursor position) across this
   // re-render. render() gets called for all sorts of reasons that have nothing to do with what's being
@@ -3183,15 +3197,20 @@ function renderCustomers(){
     return aDist - bDist;
   });
   else list.sort((a,b)=>a.name.localeCompare(b.name,'th'));
-  const listHtml = list.length? list.map(c=>{
+  // only draw the first N cards (each card is a big chunk of HTML + handlers) — with hundreds of
+  // customers, rebuilding every card on each keystroke was the real cause of the typing lag. Typing a
+  // search narrows the list so the cap rarely matters; "แสดงเพิ่ม" reveals the rest.
+  const shown = list.slice(0, customersShownLimit);
+  const listHtml = list.length? shown.map(c=>{
     let distanceKm = null;
     if(customersSort==='distance' && truckPinCoord){
       const coord = coordFromAddress(c.address);
       if(coord) distanceKm = haversineKm(truckPinCoord, coord);
     }
     return renderCustomerCard(c, { distanceKm });
-  }).join('') : '<div class="empty">ไม่พบลูกค้าที่ตรงกับเงื่อนไข</div>';
-  return toolRow + searchBar + toggleBtn + panel + `<div class="rem-meta" style="margin-bottom:8px;">พบ ${list.length} คน</div>` + listHtml;
+  }).join('') + (list.length>shown.length? `<div class="btnrow" style="margin:10px 0;"><button class="btn ghost" id="showMoreCustomersBtn">⬇️ แสดงเพิ่ม (เหลืออีก ${list.length-shown.length} คน)</button></div>` : '')
+  : '<div class="empty">ไม่พบลูกค้าที่ตรงกับเงื่อนไข</div>';
+  return toolRow + searchBar + toggleBtn + panel + `<div class="rem-meta" style="margin-bottom:8px;">พบ ${list.length} คน${list.length>shown.length? ` (แสดง ${shown.length})`:''}</div>` + listHtml;
 }
 
 function exportCustomersCSV(){
@@ -7043,7 +7062,9 @@ function attachHandlers(){
   document.querySelectorAll('[data-show-gas-breakdown]').forEach(el=>el.addEventListener('click', openGasBreakdownModal));
   const toggleCustomersFilter = document.getElementById('toggleCustomersFilter');
   if(toggleCustomersFilter) toggleCustomersFilter.addEventListener('click', ()=>{ customersFilterOpen = !customersFilterOpen; render(); });
-  document.querySelectorAll('[data-cust-filter]').forEach(b=>b.addEventListener('click', ()=>{ customersFilterType = b.dataset.custFilter; render(); }));
+  document.querySelectorAll('[data-cust-filter]').forEach(b=>b.addEventListener('click', ()=>{ customersFilterType = b.dataset.custFilter; customersShownLimit = CUSTOMERS_PAGE_SIZE; render(); }));
+  const showMoreCustomersBtn = document.getElementById('showMoreCustomersBtn');
+  if(showMoreCustomersBtn) showMoreCustomersBtn.addEventListener('click', ()=>{ customersShownLimit += CUSTOMERS_PAGE_SIZE; render(); });
   document.querySelectorAll('[data-cust-sort]').forEach(b=>b.addEventListener('click', ()=>{
     if(b.dataset.custSort === 'distance'){ selectDistanceCustomersSort(); return; }
     customersSort = b.dataset.custSort; render();
@@ -7209,6 +7230,7 @@ function attachHandlers(){
   const custSearchInput = document.getElementById('custSearchInput');
   if(custSearchInput) custSearchInput.addEventListener('input', ()=>{
     customerSearchQuery = custSearchInput.value;
+    customersShownLimit = CUSTOMERS_PAGE_SIZE;
     debounceSearchRender(()=>{
       const cursorPos = custSearchInput.selectionStart;
       render();
